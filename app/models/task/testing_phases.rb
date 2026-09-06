@@ -118,8 +118,9 @@ class Task
     # genuinely poisoned event history must not be able to wedge every future
     # release. Past a handful, a skip is no longer poison — it is systematic (a DB
     # blip mid-run, a column missing after a partial migration), and that DOES
-    # abort. Override for a known-bad row with BACKFILL_MAX_SKIPPED=<n>; nothing
-    # can override a total no-op (BackfillResult#no_op?).
+    # abort. Override for a known-bad row with BACKFILL_MAX_SKIPPED=<n> — bounded by
+    # BackfillResult#allowance_ceiling, so the escape hatch cannot be widened into a
+    # disarm. Nothing can override a total no-op (BackfillResult#no_op?).
     BACKFILL_SKIP_ALLOWANCE = 5
 
     # What a full backfill actually did, as three separate numbers.
@@ -141,18 +142,60 @@ class Task
       # touched no rows.
       def no_op? = attempted.positive? && refreshed.zero?
 
+      # The most skips ANY allowance can authorise on a board this size.
+      #
+      # BACKFILL_MAX_SKIPPED used to be unbounded, and that made it a disarm rather
+      # than an escape hatch: BACKFILL_MAX_SKIPPED=999999 let 19 of 20 tasks fail,
+      # exit 0, and stamp the release's [post-deploy] check GREEN over a board that
+      # had almost entirely failed to rewrite. The override exists for a HANDFUL of
+      # known-bad rows; a run that skipped half the board is systematic BY DEFINITION
+      # — the very condition this guard was written to catch — so no env var may
+      # authorise it.
+      #
+      # Floored at the default so the ceiling can only ever LOWER an override, never
+      # tighten the un-overridden guard: a 6-row board still tolerates its 5 poisoned
+      # rows exactly as it did before.
+      def allowance_ceiling = [BACKFILL_SKIP_ALLOWANCE, attempted / 2].max
+
+      # The allowance actually in force — what the operator asked for, capped.
+      def effective_allowance(requested) = [requested.to_i, allowance_ceiling].min
+
       # nil when the run is good enough to ship; otherwise the reason, for the abort.
       def shortfall(allowance:)
         return "refreshed #{refreshed} of #{attempted} task(s) — the backfill rewrote NOTHING" if no_op?
-        return nil if skipped <= allowance
 
-        "skipped #{skipped} of #{attempted} task(s), past the allowance of #{allowance} " \
-          "(#{named_skips}) — that is systematic, not one poisoned row"
+        effective = effective_allowance(allowance)
+        return nil if skipped <= effective
+
+        "skipped #{skipped} of #{attempted} task(s), past the allowance of #{effective}" \
+          "#{clamp_note(allowance)} (#{named_skips}) — that is systematic, not one poisoned row"
       end
 
-      def summary
+      # Named ONLY when the override was actually cut down, so the number in the abort
+      # is never one the operator cannot account for against the value they set.
+      def clamp_note(requested)
+        return "" unless requested.to_i > allowance_ceiling
+
+        " (BACKFILL_MAX_SKIPPED=#{requested} capped to #{allowance_ceiling} — an override " \
+          "cannot authorise skipping half the board)"
+      end
+
+      # A skipped row reads as a WARNING, not as an ordinary summary line. The old
+      # wording ("refreshed 1 of 20 task(s); skipped 19") scrolled past in a release
+      # log looking like every other status line, which is how a tolerated mass skip
+      # stayed invisible. `allowance:` is optional so the Struct stays printable on
+      # its own; when given, the line also says what made the skips survivable.
+      def summary(allowance: nil)
         base = "refreshed #{refreshed} of #{attempted} task(s)"
-        skipped.zero? ? base : "#{base}; skipped #{skipped} (#{named_skips})"
+        return base if skipped.zero?
+
+        "⚠ #{base}; SKIPPED #{skipped} of #{attempted} (#{named_skips})#{allowance_note(allowance)}"
+      end
+
+      def allowance_note(allowance)
+        return "" if allowance.nil? || skipped > effective_allowance(allowance)
+
+        " — tolerated under an allowance of #{effective_allowance(allowance)}"
       end
 
       # Bounded so a whole-board failure cannot bury the abort reason under 1,600 slugs.

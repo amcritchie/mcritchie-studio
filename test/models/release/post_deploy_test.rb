@@ -213,6 +213,23 @@ class Release::PostDeployTest < ActiveSupport::TestCase
     assert_equal 3, plan.size, "case-differing arguments are DIFFERENT work — never fold them away"
   end
 
+  # The same regression one layer up: two MEMBERS whose commands differ only inside a
+  # quoted argument must plan as two dynos. Folded, the second never runs and still
+  # collects a green [post-deploy] check.
+  test "[unit] plan does NOT fold two members differing only inside a quoted argument" do
+    repos = [{ "repo" => "mcritchie-studio", "kind" => "app", "qa_app" => "mcritchie-studio",
+               "members" => [
+                 { "slug" => "wide", "post_deploy_cmd" => %q{bin/rails runner 'Backfill.run("a  b")'} },
+                 { "slug" => "narrow", "post_deploy_cmd" => %q{bin/rails runner 'Backfill.run("a b")'} }
+               ] }]
+    plan = PD.plan(repos, qa_environments: QA_ENVS, target: :qa)
+
+    assert_equal 2, plan.size, "different argv is different work — each declaration gets its own dyno"
+    assert_equal [%w[wide], %w[narrow]], plan.map { |e| e["tasks"] },
+                 "neither member may ride along on the other's run"
+    refute_equal(*plan.map { |e| Shellwords.split(e["cmd"]) })
+  end
+
   test "plan keeps each unroutable declaration visible instead of folding them" do
     repos = [{ "repo" => "studio-engine", "kind" => "gem", "qa_app" => nil,
                "members" => [{ "slug" => "g1", "post_deploy_cmd" => "rake noop" },
@@ -231,17 +248,44 @@ class Release::PostDeployTest < ActiveSupport::TestCase
 
   # --- work_key: the normalisation the dedupe compares on --------------------
 
-  test "work_key strips the interchangeable rails/rake runner and collapses whitespace" do
+  test "[unit] work_key strips the interchangeable rails/rake runner, spacing and all" do
     key = PD.work_key("rake tasks:backfill_testing_phases")
 
     assert_equal key, PD.work_key("bin/rails tasks:backfill_testing_phases")
     assert_equal key, PD.work_key("  bundle  exec   rake   tasks:backfill_testing_phases  ")
-    assert_equal "tasks:backfill_testing_phases", key
+    assert_equal "tasks:backfill_testing_phases", key,
+                 "RUNNER_PREFIX carries its own \\s+, so the runner's own spacing needs no separate collapse"
   end
 
-  test "work_key leaves a non-rails command alone rather than guessing at it" do
-    assert_equal "./script/warm_cache --all", PD.work_key("./script/warm_cache  --all")
+  # THE REGRESSION. work_key used to `gsub(/\s+/, " ")` before comparing, and that
+  # collapse reached INSIDE quoted arguments — so these two, whose argv genuinely
+  # differ, keyed alike. The second was folded away UNRUN and still had its
+  # [post-deploy] check stamped green: a false MERGE committed by the guard whose
+  # whole purpose is preventing one.
+  test "[unit] work_key does NOT fold commands differing only inside a quoted argument" do
+    two_spaces = %q{bin/rails runner 'Backfill.run("a  b")'}
+    one_space  = %q{bin/rails runner 'Backfill.run("a b")'}
+
+    refute_equal Shellwords.split(two_spaces), Shellwords.split(one_space),
+                 "the premise: these are different argv, so they are different work"
+    refute_equal PD.work_key(two_spaces), PD.work_key(one_space),
+                 "argument whitespace is significant — folding these skips declared work silently"
+  end
+
+  test "[unit] work_key leaves a non-rails command byte-for-byte alone" do
+    assert_equal "./script/warm_cache  --all", PD.work_key("./script/warm_cache  --all"),
+                 "nothing but the runner prefix is normalised away"
     refute_equal PD.work_key("rake a"), PD.work_key("rake b")
+  end
+
+  # An unbalanced quote must not be able to raise out of `plan` — `--dry-run` builds
+  # the same plan, and the preview that exists to surface a malformed declaration
+  # must print it rather than blow up on it. (Shellwords.split raises here.)
+  test "[unit] work_key survives an unbalanced quote instead of raising" do
+    malformed = %q{bin/rails runner 'Backfill.run("a b)}
+
+    assert_raises(ArgumentError) { Shellwords.split(malformed) }
+    assert_equal %q{runner 'Backfill.run("a b)}, PD.work_key(malformed)
   end
 
   # --- heroku_argv: the flag that makes a failing command turn the hook RED ---

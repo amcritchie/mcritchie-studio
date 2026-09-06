@@ -86,6 +86,41 @@ class TasksBackfillTestingPhasesRakeTest < ActiveSupport::TestCase
     poisoned.each { |slug| assert_match(slug, out, "a tolerated skip is still named in the deploy log") }
   end
 
+  # --- the ceiling: an override widens the hatch, it cannot remove the floor --
+
+  # THE REGRESSION. BACKFILL_MAX_SKIPPED was unbounded, which made it a DISARM
+  # rather than a widening: on a 20-row board, 19 rows could fail with
+  # BACKFILL_MAX_SKIPPED=999999, the rake still exited 0, `heroku run --exit-code`
+  # reported success, and the release stamped its [post-deploy] check GREEN over a
+  # board that had barely been rewritten at all.
+  test "a huge override cannot make a mass skip exit 0" do
+    tasks = make_tasks(20)
+    poisoned = tasks.first(19).map(&:slug)
+
+    out, status = with_env("BACKFILL_MAX_SKIPPED" => "999999") do
+      stub_refresh_failing_for(poisoned) { run_rake }
+    end
+
+    refute_equal 0, status, "19 of 20 skipped is systematic — no env var may ship that green"
+    assert_match(/capped to 10/, out, "the abort names the cap in force, not the number typed")
+  end
+
+  # The hatch must SURVIVE the cap, or the fix would have traded an unbounded
+  # override for no override at all. 8 skips sits over the default 5 and under this
+  # board's ceiling of 10, so only a raised allowance can carry it.
+  test "an override still tolerates more than the default below the ceiling" do
+    tasks = make_tasks(20)
+    poisoned = tasks.first(8).map(&:slug)
+
+    _out, capped = with_env("BACKFILL_MAX_SKIPPED" => "8") do
+      stub_refresh_failing_for(poisoned) { run_rake }
+    end
+    _out, defaulted = stub_refresh_failing_for(poisoned) { run_rake }
+
+    assert_equal 0, capped, "the escape hatch is capped, not removed"
+    refute_equal 0, defaulted, "premise: 8 skips DO abort without the override"
+  end
+
   # --- the happy path stays green --------------------------------------------
 
   test "a clean run exits 0 and reports refreshed of attempted" do
@@ -105,6 +140,17 @@ class TasksBackfillTestingPhasesRakeTest < ActiveSupport::TestCase
   end
 
   private
+
+  # Set env vars for the block and restore exactly what was there — the rake reads
+  # BACKFILL_MAX_SKIPPED through Task::TestingPhases.backfill_skip_allowance(env: ENV),
+  # so the override has to travel the real path to be worth asserting.
+  def with_env(pairs)
+    saved = pairs.keys.to_h { |k| [k, ENV[k]] }
+    pairs.each { |k, v| ENV[k] = v }
+    yield
+  ensure
+    saved.each { |k, v| v.nil? ? ENV.delete(k) : ENV[k] = v }
+  end
 
   # Stub refresh! to raise for exactly the named slugs and succeed for the rest —
   # the "one poisoned row" shape, as opposed to the systematic all-rows failure.
