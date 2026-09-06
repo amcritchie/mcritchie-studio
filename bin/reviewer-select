@@ -48,7 +48,9 @@
 # the light on a diff Alex had written every test on (PR #1081, built_by=steffon),
 # and a hand-passed `--busy alex` was the only thing that stopped it. The set is read
 # from devops.builders (server-owned, append-only, stamped on every build claim),
-# unioned with built_by and every `→ building` event actor.
+# unioned with built_by and every `→ building` event actor EXCEPT a block's — a
+# rework bounce lands the task back on `building`, so that transition names the
+# REVIEWER who sent the work back, not an author.
 #
 # ⛔ THIS TOOL REFUSES (exit 2, selecting and recording NOTHING) in four states,
 # because an empty exclusion list is not the same answer as "nobody to exclude" —
@@ -418,9 +420,12 @@ unless decision["builder_known"]
       warn!("  exclusion has nothing to exclude. Check the spelling against:")
       warn!("    #{ReviewerSelector::POOL.union([ReviewerSelector::DEFAULT_QA_OWNER]).sort.join(", ")}")
     else
-      warn!("  devops.built_by is blank and no `→ building` event names a soul, so the")
-      warn!("  no-self-review exclusion has nothing to exclude. Selecting anyway could")
+      warn!("  devops.built_by is blank and no `→ building` BUILD CLAIM names a soul, so")
+      warn!("  the no-self-review exclusion has nothing to exclude. Selecting anyway could")
       warn!("  hand the PR to the soul who wrote it — refusing instead.")
+      warn!("  (A rework block bounces the task onto `building` too. That transition is the")
+      warn!("  REVIEWER's and is deliberately NOT read as authorship, so after a bounce the")
+      warn!("  trail holds no author to find — state the fact, or stamp it durably below.)")
     end
   else
     # The INCOMPLETE set. Someone else worked this task and the record cannot say

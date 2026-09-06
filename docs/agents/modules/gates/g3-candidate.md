@@ -87,7 +87,8 @@ run inside it rides the close:
   QA deploy IS the smoke).
 - **Post-deploy hooks** (`qa_post_deploy` SOPs) — each member's declared
   `devops.post_deploy_cmd` runs against its QA app; a non-zero exit aborts
-  prepare.
+  prepare. Members declaring the same work run once — the plan folds the
+  `rake`/`bin/rails` spellings of one command and records the check on each.
 - **The CI verdict** — GitHub CI's conclusion for the release SHA **IS** the G3
   verdict (DevOps v2 Phase 3): green certifies, every other state fails closed. The
   verdict is recorded on the release (`qa_gates[repo]`). See

@@ -1,3 +1,5 @@
+require "shellwords"
+
 class Release
   # Pure decision logic for the release pipeline's post-deploy command hook —
   # the seam behind `bin/release prepare`/`ship` that runs a release member's
@@ -36,19 +38,24 @@ class Release
     #                     (qa-server key → { "heroku_app", "production_app", … }).
     # `target`          — :qa (run on the QA heroku app) or :prod (run on prod).
     #
-    # Returns one entry PER member that declares a real post_deploy_cmd, in
-    # plan (producer-first) order. A blank/whitespace-only command is skipped, as
-    # is the literal "none" — the no-op sentinel the dor-check gate hands authors
-    # of schema-only migrations (so the sentinel honored on the gate side is
-    # honored end-to-end here, not run as `heroku run none`).
-    #   { "task" => slug, "repo" => repo, "app" => heroku-app, "cmd" => command }
-    # `app` is "" when the repo has no registered target for `target` — the CLI
-    # treats a blank app as a hard abort (a declared command with nowhere to run),
-    # so a misdeclared command never silently no-ops.
+    # Returns one entry per DISTINCT PIECE OF WORK, in plan (producer-first) order.
+    # A blank/whitespace-only command is skipped, as is the literal "none" — the
+    # no-op sentinel the dor-check gate hands authors of schema-only migrations (so
+    # the sentinel honored on the gate side is honored end-to-end here, not run as
+    # `heroku run none`). Members declaring the same work on the same app FOLD into
+    # one entry (see #dedupe).
+    #   { "task" => slug, "tasks" => [slug, ...], "repo" => repo,
+    #     "app" => heroku-app, "cmd" => command }
+    # "task" is the first (producer-first) member and stays for callers that want a
+    # single label; "tasks" is every member the entry runs on behalf of, so the CLI
+    # can stamp the [post-deploy] check on ALL of them and a folded member never
+    # silently loses its record. `app` is "" when the repo has no registered target
+    # for `target` — the CLI treats a blank app as a hard abort (a declared command
+    # with nowhere to run), so a misdeclared command never silently no-ops.
     def plan(repos, qa_environments:, target:)
       raise ArgumentError, "target must be one of #{TARGETS.inspect}, got #{target.inspect}" unless TARGETS.include?(target)
 
-      Array(repos).flat_map do |group|
+      entries = Array(repos).flat_map do |group|
         app = target_app(qa_environments, group["qa_app"], target)
         Array(group["members"]).filter_map do |member|
           cmd = member["post_deploy_cmd"].to_s.strip
@@ -57,10 +64,69 @@ class Release
           # run `heroku run none` and abort the whole release on the common path.
           next if cmd.empty? || cmd.casecmp?("none")
 
-          { "task" => member["slug"].to_s, "repo" => group["repo"].to_s,
+          slug = member["slug"].to_s
+          { "task" => slug, "tasks" => [slug], "repo" => group["repo"].to_s,
             "app" => app, "cmd" => cmd }
         end
       end
+
+      dedupe(entries)
+    end
+
+    # Fold entries that do the SAME WORK on the SAME APP into one command.
+    #
+    # WHY: `plan` emitted one entry per MEMBER, and two members can declare one job
+    # in two spellings. A real release carried block-blind-duration-readers with
+    # `bin/rails tasks:backfill_testing_phases` and review-phase-lacks-ordering-guard
+    # with `rake tasks:backfill_testing_phases` — one job, two `heroku run` dynos.
+    # The commands are idempotent so the RESULT was right, but the redundant run
+    # doubles a multi-minute deploy window and, under `--exit-code`, a dropped
+    # connection on the second dyno aborts the whole release for work already done.
+    #
+    # The FIRST entry survives: producer-first order is load-bearing (a gem's backfill
+    # must precede its consumer's), and folding must never reorder the plan. Every
+    # folded member's slug rides along in "tasks" so the CLI still records the
+    # [post-deploy] check on each of them.
+    #
+    # A blank app is deliberately NOT folded: it is a hard abort, and each
+    # misdeclaration has to reach the operator by name — otherwise they fix one,
+    # re-run the release, and hit the next one twelve minutes later.
+    def dedupe(entries)
+      entries.each_with_object([]) do |entry, kept|
+        prior = entry["app"].empty? ? nil : kept.find { |e| same_work?(e, entry) }
+        prior ? prior["tasks"] |= entry["tasks"] : kept << entry
+      end
+    end
+
+    def same_work?(left, right)
+      left["app"] == right["app"] && work_key(left["cmd"]) == work_key(right["cmd"])
+    end
+
+    # The interchangeable ways to spell "run this rake task on the dyno". Case-folded
+    # like the "none" sentinel above, because the RUNNER is a synonym, not an argument.
+    RUNNER_PREFIX = %r{\A(?:bundle\s+exec\s+)?(?:\./)?(?:bin/)?(?:rails|rake)\s+}i
+
+    # The dedupe compares WORK, not strings: collapse whitespace, then drop the
+    # interchangeable runner prefix.
+    #
+    # Everything AFTER the runner is compared CASE-SENSITIVELY on purpose. A
+    # command's arguments can be case-significant, and the two ways to be wrong here
+    # are not symmetric: a false SPLIT runs an idempotent command twice (merely
+    # slow), while a false MERGE silently skips declared work — which is the exact
+    # failure class this task exists to close. So the bias is toward splitting.
+    def work_key(cmd)
+      cmd.to_s.strip.gsub(/\s+/, " ").sub(RUNNER_PREFIX, "")
+    end
+
+    # The canonical argv for running one planned entry, in ONE place so --dry-run
+    # prints exactly what executes and the flags can be asserted in a test.
+    #
+    # `--exit-code` is the load-bearing one: without it `heroku run` returns 0 the
+    # instant the dyno LAUNCHES, whatever the remote command then did, and a failing
+    # post-deploy command would be recorded GREEN. `--` stops heroku parsing a
+    # task-declared cmd as its own flags; Shellwords.split keeps quoted args intact.
+    def heroku_argv(app:, cmd:)
+      ["heroku", "run", "-a", app, "--no-tty", "--exit-code", "--", *Shellwords.split(cmd)]
     end
 
     # The heroku app a post-deploy command runs on for `target`, resolved from the

@@ -2682,17 +2682,25 @@ when "checkpoint"
 when "heartbeat"
   # The live-terminal lease renewal — bin/statusline calls this each render
   # (throttled) so a crashed/closed session's claim lapses after the TTL and the
-  # task becomes reclaimable. Renews THIS instance's claim on <slug> (or adopts an
-  # unclaimed/expired one); NEVER steals a live foreign claim. Fully best-effort:
-  # no session, no slug, or any API error → silent no-op (a heartbeat must never
-  # disrupt the status line). Prints nothing on success.
+  # task becomes reclaimable. RENEWS THIS INSTANCE'S CLAIM on <slug>, and does no
+  # more than that: it NEVER steals a live foreign claim, and it does not ADOPT a
+  # free one either — an unclaimed or expired lease is acquired only from a session
+  # sitting at the task's bound DESK (#heartbeat_may_claim?), because acquiring a
+  # lease is a claim of authorship and a painting terminal is not. Fully
+  # best-effort: no session, no slug, or any API error → silent no-op (a heartbeat
+  # must never disrupt the status line). Prints nothing on success.
   usage = "usage: bin/task heartbeat <slug> [--desk PATH]"
   slug = positional!(ARGV.shift || die!(usage), usage)
-  # The desk whose file mtimes decide whether this claim is still being WORKED.
-  # bin/statusline passes its cwd when that cwd is a bound worktree; absent, we
-  # try cwd anyway. Either way DeskActivity.desk_root refuses any directory not
-  # bound to THIS task, so a heartbeat fired from a primary checkout resolves no
-  # desk and falls back to renewing — see the abandonment check below.
+  # The desk whose file mtimes decide whether this claim is still being WORKED, and
+  # whether it may be ACQUIRED at all. bin/statusline passes its cwd when that cwd
+  # is a bound worktree; absent, we try cwd anyway. Either way
+  # DeskActivity.desk_root refuses any directory not bound to THIS task, so a
+  # heartbeat fired from a primary checkout resolves no desk — and that costs it
+  # BOTH desk-backed powers: #heartbeat_abandoned? has no mtimes to read (see the
+  # abandonment check below), and #heartbeat_may_claim? DECLINES to acquire a free
+  # lease rather than falling back to renewing. Declining is the point: adopting on
+  # a resolved-nothing was how a reviewer's terminal claimed the task it had just
+  # bounced and got recorded as its author.
   heartbeat_desk = nil
   while ARGV.any?
     case (flag = ARGV.shift)

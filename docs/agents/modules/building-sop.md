@@ -68,7 +68,9 @@ bin/task begin --title "Three To Five Words" --repo <app> --kind <kind> --agent 
   slug and is RE-POINTED when another soul re-claims the task, which erased the
   first author on PR #1081 and duly seated him as his own light. The exclusion is
   the union of `built_by`, the server-owned append-only `devops.builders`, and
-  every `→ building` event actor.
+  every `→ building` event actor **that is a build CLAIM** — a rework block bounces
+  the task back onto `building` too, and that transition's actor is the reviewer who
+  sent it back, so it is skipped rather than read as an author.
   Safe on a task **already** at `building` — the stamp rides the build CLAIM, not
   the transition — and re-running it is idempotent. With neither flag,
   `bin/reviewer-select` has no builder to exclude, so it **refuses to pick

@@ -617,4 +617,84 @@ class Task::TestingPhasesTest < ActiveSupport::TestCase
     refute_equal({ "sentinel" => true }, Task.find_by!(slug: task.slug).testing_phases,
                  "a review gate rebuilds it")
   end
+
+  # --- backfill!: the result must distinguish "nothing to do" from "nothing done" ---
+  #
+  # backfill! used to return a bare SUCCESS count while its per-task rescue swallowed
+  # every failure, so a systematic failure drove the count toward ZERO — the same
+  # number an empty board reports. The result now carries attempted/refreshed/skipped
+  # so the caller can tell those two apart and abort on the second.
+
+  test "[unit] backfill! reports attempted, refreshed and the skipped slugs" do
+    ok    = Task.create!(title: "Backfill Result Ok")
+    bad_a = Task.create!(title: "Backfill Result Bad A")
+    bad_b = Task.create!(title: "Backfill Result Bad B")
+    poisoned = [bad_a.slug, bad_b.slug]
+
+    result = Task::TestingPhases.stub(:refresh!, ->(task, **) { raise "boom" if poisoned.include?(task.slug) }) do
+      Task::TestingPhases.backfill!
+    end
+
+    population = Task.count
+    assert_equal population, result.attempted, "attempted counts the whole population, raise or not"
+    assert_equal population - 2, result.refreshed, "only rows that did not raise count as refreshed"
+    assert_equal poisoned.sort, result.skipped_slugs.sort, "the skipped rows are NAMED, not just counted"
+    assert_equal 2, result.skipped
+    assert_includes(Task.pluck(:slug) - result.skipped_slugs, ok.slug)
+  end
+
+  test "[unit] backfill! actually rewrites the stored projection to the current VERSION" do
+    task = probe_task
+    task.update_columns(testing_phases: { "sentinel" => true }, testing_phases_version: 0) # rubocop:disable Rails/SkipsModelValidations
+
+    result = Task::TestingPhases.backfill!
+
+    assert_equal Task.count, result.refreshed, "a clean run refreshes the whole population"
+    assert_empty result.skipped_slugs
+    stored = Task.find_by!(slug: task.slug)
+    assert_equal Task::TestingPhases::VERSION, stored.testing_phases_version,
+                 "the column rewrite is the ONLY path that reaches a version-blind reader"
+    assert_equal 600, stored.testing_phases.dig("phases", "build", "seconds")
+  end
+
+  # --- the shortfall policy (what the rake aborts on) ------------------------
+
+  test "[unit] a run that rewrote nothing on a non-empty board is a shortfall" do
+    result = Task::TestingPhases::BackfillResult.new(4, 0, %w[a b c d])
+
+    assert result.no_op?
+    refute_nil result.shortfall(allowance: 99), "no allowance can excuse a total no-op"
+    assert_match(/refreshed 0 of 4/, result.shortfall(allowance: 99))
+  end
+
+  test "[unit] an empty board is complete, not a shortfall" do
+    result = Task::TestingPhases::BackfillResult.new(0, 0, [])
+
+    refute result.no_op?, "0 of 0 is a complete run"
+    assert_nil result.shortfall(allowance: 0)
+  end
+
+  test "[unit] skips within the allowance pass; one more is a shortfall" do
+    within = Task::TestingPhases::BackfillResult.new(100, 98, %w[a b])
+    beyond = Task::TestingPhases::BackfillResult.new(100, 97, %w[a b c])
+
+    assert_nil within.shortfall(allowance: 2), "isolated poison must not wedge the release"
+    assert_match(/skipped 3 of 100/, beyond.shortfall(allowance: 2).to_s)
+  end
+
+  test "[unit] the skip allowance is overridable by env for a known-bad row" do
+    assert_equal Task::TestingPhases::BACKFILL_SKIP_ALLOWANCE, Task::TestingPhases.backfill_skip_allowance(env: {})
+    assert_equal 12, Task::TestingPhases.backfill_skip_allowance(env: { "BACKFILL_MAX_SKIPPED" => " 12 " })
+    assert_equal Task::TestingPhases::BACKFILL_SKIP_ALLOWANCE,
+                 Task::TestingPhases.backfill_skip_allowance(env: { "BACKFILL_MAX_SKIPPED" => "lots" }),
+                 "a garbled override falls back to the default rather than disarming the guard"
+  end
+
+  test "[unit] the summary names the skipped rows so a tolerated skip is visible" do
+    result = Task::TestingPhases::BackfillResult.new(10, 8, %w[poisoned-a poisoned-b])
+
+    assert_match(/refreshed 8 of 10/, result.summary)
+    assert_match(/poisoned-a/, result.summary)
+    assert_match(/poisoned-b/, result.summary)
+  end
 end

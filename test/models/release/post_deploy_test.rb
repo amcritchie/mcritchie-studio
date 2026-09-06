@@ -143,4 +143,123 @@ class Release::PostDeployTest < ActiveSupport::TestCase
     assert_equal "", PD.target_app(QA_ENVS, nil, :prod)
     assert_equal "", PD.target_app(nil, "turf-monster", :qa)
   end
+
+  # --- plan: dedupe by the WORK, not the command string ----------------------
+  #
+  # THE BUG: `plan` emitted one entry per MEMBER. A real release carried
+  # block-blind-duration-readers declaring `bin/rails tasks:backfill_testing_phases`
+  # and review-phase-lacks-ordering-guard declaring `rake tasks:backfill_testing_phases`
+  # — the SAME job, two spellings, two `heroku run` dynos. The commands are idempotent
+  # so correctness held, but the redundant run doubles a multi-minute deploy window
+  # and, under `--exit-code`, a dropped connection on the second dyno aborts the whole
+  # release for work that was already done.
+
+  test "plan folds the two rails/rake spellings of one job into a single command" do
+    repos = [
+      { "repo" => "mcritchie-studio", "kind" => "app", "qa_app" => "mcritchie-studio",
+        "members" => [
+          { "slug" => "block-blind-duration-readers", "post_deploy_cmd" => "bin/rails tasks:backfill_testing_phases" },
+          { "slug" => "review-phase-lacks-ordering-guard", "post_deploy_cmd" => "rake tasks:backfill_testing_phases" }
+        ] }
+    ]
+    plan = PD.plan(repos, qa_environments: QA_ENVS, target: :qa)
+
+    assert_equal 1, plan.size, "one job, one dyno"
+    assert_equal "bin/rails tasks:backfill_testing_phases", plan.first["cmd"],
+                 "the FIRST spelling in producer-first order is the one that runs"
+    assert_equal %w[block-blind-duration-readers review-phase-lacks-ordering-guard],
+                 plan.first["tasks"],
+                 "every folded member is carried so the CLI still stamps its [post-deploy] check"
+    assert_equal "block-blind-duration-readers", plan.first["task"], "the legacy single-task key still resolves"
+  end
+
+  test "plan folds bundle-exec, ./bin and case-differing runner prefixes onto the same work" do
+    spellings = ["rake data:backfill", "bundle exec rake data:backfill", "bin/rails data:backfill",
+                 "./bin/rake  data:backfill", "RAKE data:backfill", "  rails   data:backfill  "]
+    repos = [{ "repo" => "mcritchie-studio", "kind" => "app", "qa_app" => "mcritchie-studio",
+               "members" => spellings.each_with_index.map { |c, i| { "slug" => "m#{i}", "post_deploy_cmd" => c } } }]
+    plan = PD.plan(repos, qa_environments: QA_ENVS, target: :qa)
+
+    assert_equal 1, plan.size, "the runner prefix is interchangeable; the TASK is the work"
+    assert_equal %w[m0 m1 m2 m3 m4 m5], plan.first["tasks"]
+  end
+
+  test "plan runs the same command once PER APP, never folding across apps" do
+    repos = [
+      { "repo" => "mcritchie-studio", "kind" => "app", "qa_app" => "mcritchie-studio",
+        "members" => [{ "slug" => "hub", "post_deploy_cmd" => "rake data:backfill" }] },
+      { "repo" => "turf-monster", "kind" => "app", "qa_app" => "turf-monster",
+        "members" => [{ "slug" => "turf", "post_deploy_cmd" => "bin/rails data:backfill" }] }
+    ]
+    plan = PD.plan(repos, qa_environments: QA_ENVS, target: :qa)
+
+    assert_equal 2, plan.size, "each app needs its own run — same work, different dyno"
+    assert_equal %w[mcritchie-studio-qa turf-monster-qa], plan.map { |e| e["app"] }
+  end
+
+  # The dedupe is biased toward a FALSE SPLIT (running an idempotent command twice,
+  # merely slow) over a FALSE MERGE (silently skipping declared work) — which is the
+  # very failure mode this task exists to close. So only the interchangeable runner
+  # prefix is case-folded; a command's arguments can be case-significant.
+  test "plan does NOT fold two commands that differ after the runner prefix" do
+    repos = [{ "repo" => "mcritchie-studio", "kind" => "app", "qa_app" => "mcritchie-studio",
+               "members" => [
+                 { "slug" => "a", "post_deploy_cmd" => "bin/rails runner 'Backfill.run(\"Alpha\")'" },
+                 { "slug" => "b", "post_deploy_cmd" => "bin/rails runner 'Backfill.run(\"alpha\")'" },
+                 { "slug" => "c", "post_deploy_cmd" => "rake data:other" }
+               ] }]
+    plan = PD.plan(repos, qa_environments: QA_ENVS, target: :qa)
+
+    assert_equal 3, plan.size, "case-differing arguments are DIFFERENT work — never fold them away"
+  end
+
+  test "plan keeps each unroutable declaration visible instead of folding them" do
+    repos = [{ "repo" => "studio-engine", "kind" => "gem", "qa_app" => nil,
+               "members" => [{ "slug" => "g1", "post_deploy_cmd" => "rake noop" },
+                             { "slug" => "g2", "post_deploy_cmd" => "bin/rails noop" }] }]
+    plan = PD.plan(repos, qa_environments: QA_ENVS, target: :prod)
+
+    assert_equal %w[g1 g2], plan.map { |e| e["task"] },
+                 "a blank app is a hard abort — every misdeclaration must reach the operator by name"
+  end
+
+  test "every planned entry carries a tasks list, folded or not" do
+    plan = PD.plan(REPOS, qa_environments: QA_ENVS, target: :qa)
+
+    assert_equal [%w[t-turf]], plan.map { |e| e["tasks"] }
+  end
+
+  # --- work_key: the normalisation the dedupe compares on --------------------
+
+  test "work_key strips the interchangeable rails/rake runner and collapses whitespace" do
+    key = PD.work_key("rake tasks:backfill_testing_phases")
+
+    assert_equal key, PD.work_key("bin/rails tasks:backfill_testing_phases")
+    assert_equal key, PD.work_key("  bundle  exec   rake   tasks:backfill_testing_phases  ")
+    assert_equal "tasks:backfill_testing_phases", key
+  end
+
+  test "work_key leaves a non-rails command alone rather than guessing at it" do
+    assert_equal "./script/warm_cache --all", PD.work_key("./script/warm_cache  --all")
+    refute_equal PD.work_key("rake a"), PD.work_key("rake b")
+  end
+
+  # --- heroku_argv: the flag that makes a failing command turn the hook RED ---
+
+  test "heroku_argv passes --exit-code so a failing command propagates its status" do
+    argv = PD.heroku_argv(app: "mcritchie-studio-qa", cmd: "bin/rails tasks:backfill_testing_phases")
+
+    assert_equal ["heroku", "run", "-a", "mcritchie-studio-qa", "--no-tty", "--exit-code", "--",
+                  "bin/rails", "tasks:backfill_testing_phases"], argv
+    assert_includes argv, "--exit-code",
+                    "without it `heroku run` returns 0 the instant the dyno LAUNCHES, whatever " \
+                    "the command did — and a failing backfill would record GREEN"
+  end
+
+  test "heroku_argv terminates flag parsing and keeps quoted args intact" do
+    argv = PD.heroku_argv(app: "app", cmd: %(bin/rails runner "puts 'a b'"))
+
+    assert_equal "--", argv[argv.index("--")], "`--` stops heroku reparsing a declared cmd as its own flags"
+    assert_equal ["bin/rails", "runner", "puts 'a b'"], argv[(argv.index("--") + 1)..]
+  end
 end

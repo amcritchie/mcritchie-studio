@@ -194,6 +194,90 @@ module FastCert
     }
   end
 
+  # --- the zero-evidence guard ----------------------------------------------------
+  #
+  # WHAT THIS CERT WILL ACTUALLY EXECUTE, as a set of test PATHS. Both lanes that can
+  # run tests are consulted: the mapped lane — EMPTY when the cap above skipped it —
+  # and the spine.
+  #
+  # STATED LIMIT: this counts paths SELECTED, not test cases executed. A selected file
+  # that happens to contain no test cases still counts here, because seeing that needs
+  # the runner's own output. This guard needs only the selection, which is why it can be
+  # decided before a single lane runs.
+  def executed_test_paths(mapped_only, spine, cap)
+    ran_mapped = cap && cap[:capped] ? [] : Array(mapped_only)
+    (ran_mapped + Array(spine)).uniq
+  end
+
+  # A CERT THAT EXECUTES ZERO TESTS MUST NOT REPORT GREEN.
+  #
+  # Live on turf-monster PR #549, 2026-09-05, verbatim from checks_run:
+  #
+  #   fast cert green: 0 mapped (CAPPED: 26 > 15; spine only) + 0 spine test path(s),
+  #   rubocop on 3 changed file(s)
+  #
+  # Read it slowly. The mapped lane was capped, so it announced a fallback to the spine;
+  # the spine then resolved to ZERO paths. Nothing ran. The one executed check was
+  # rubocop — a linter, which cannot observe behaviour — and the gate printed "green".
+  # Three of five builds that night degraded this way, and every reviewer had to be told
+  # by hand to weight CI over the G1 cert. A gate whose verdict needs a verbal caveat is
+  # not a gate.
+  #
+  # WHY THE GUARD IS KEYED ON ZERO EXECUTED TESTS AND NOT ON THE CAP. The cap is one door
+  # into this room, not the room. Keyed on the cap, a satellite diff that maps to 26 test
+  # files would be refused while a satellite diff that maps to NONE — strictly LESS
+  # evidence — would still certify green on rubocop alone. That ordering is incoherent, and
+  # the second door is not hypothetical: config/fast_cert_spine.yml is anchored in the hub
+  # and NONE of its entries exist in turf-monster or rolio, so on either satellite the spine
+  # is always empty and the mapped lane is the only lane that can run a test at all.
+  #
+  # WHAT IT DELIBERATELY DOES NOT DO: it does not degrade a capped run that still ran a
+  # spine. That run executed real tests, and its evidence line already says "0 mapped
+  # (CAPPED: ...)" beside a loud MAPPED LANE CAPPED narration — it is a NARROWER cert,
+  # honestly labelled, which is what the cap was designed to produce. Refusing it too
+  # would degrade builds that legitimately certified.
+  #
+  # THE CAP ITSELF IS UNTOUCHED. This changes what a capped run REPORTS, never how much it
+  # runs — an uncapped mapped lane on a broad diff is the ~31-minute local suite the fast
+  # lane exists to avoid.
+  #
+  # Returns the refusal text (the caller prefixes "fast-check: " and aborts), or nil when
+  # at least one test path will run. Mirrors the string-or-nil shape of the script's other
+  # preconditions — CertRootGuard.refusal, DeskGuard.refusal, CertTreeGuard.refusal.
+  def zero_test_refusal(mapped_only, spine, cap, slug: nil)
+    return nil unless executed_test_paths(mapped_only, spine, cap).empty?
+
+    task = slug.to_s.strip.empty? ? "<task>" : slug.to_s.strip
+    capped = !!(cap && cap[:capped])
+    why =
+      if capped
+        culprit =
+          if cap[:worst_path]
+            " (widest: #{cap[:worst_path]} → #{cap[:worst_count]} test file(s))"
+          else
+            ""
+          end
+        "the mapped lane was CAPPED — #{cap[:count]} mapped path(s) over the cap of " \
+          "#{cap[:cap]}#{culprit} — so it ran nothing"
+      else
+        "the diff maps to NO test file — no convention target, and no word-boundary grep hit"
+      end
+    override =
+      if capped
+        "\n  (or run the mapped lane anyway, deliberately: FAST_CHECK_MAPPED_CAP=#{cap[:count]} " \
+          "bin/fast-check #{task} — that is the broad local suite this cap exists to avoid.)"
+      else
+        ""
+      end
+
+    "REFUSING TO CERTIFY — this run would execute ZERO test files, so there is nothing to " \
+      "certify. #{why}, and this checkout resolves NO spine entries (the spine list is " \
+      "anchored in the hub; a satellite checkout resolves none of it). That leaves rubocop " \
+      "as the only lane, and a linter cannot observe behaviour — a green cert here would be " \
+      "a verdict on evidence that does not exist. Run the cert that DOES cover this diff:" \
+      "\n    bin/full-suite-check #{task}#{override}"
+  end
+
   # --- spine --------------------------------------------------------------------
   # The curated always-run core from config/fast_cert_spine.yml. Entries may be
   # files or directories; only ones that exist under root survive (the hub's

@@ -1000,8 +1000,12 @@ ONE deterministic verb — **`bin/release prepare --yes [--task SLUG ...]
    waits for boot
    (`wait_for_boot` polls `/up`), then runs each member's declared
    `devops.post_deploy_cmd` on its **QA heroku app** (`heroku run`, records the
-   `[post-deploy]` outcome, **aborts on non-zero** — the `{task, app, cmd}` plan
-   is the unit-tested `Release::PostDeploy.plan`).
+   `[post-deploy]` outcome, **aborts on non-zero** — the
+   `{task, tasks, app, cmd}` plan is the unit-tested
+   `Release::PostDeploy.plan`). Members that declare the SAME work on the same
+   app run **once**: the plan folds the interchangeable `rake`/`bin/rails`
+   spellings of one command into a single dyno and stamps the `[post-deploy]`
+   check on every folded member.
 7. **QA-green flip.** Only after every QA dyno boots AND every post-deploy hook
    is green: `Release::Conductor.qa_green!` flips the swept members `reviewed →
    assembled` (`merged` stays `"release"`) and the RC assembling→assembled. **A
@@ -1061,7 +1065,8 @@ each ff lands (best-effort; the interrupted-run skip signal — a re-run's ffs
 no-op and `ship!` re-stamps it regardless) — deploys (`git push heroku main`;
 release phase runs migrations), and smokes `/up`. After every app deploys + smokes (and before the
 `shipped` record), the **post-deploy hook** runs each member's
-`devops.post_deploy_cmd` on its **production app** via `heroku run`, records the
+`devops.post_deploy_cmd` on its **production app** via `heroku run` (duplicate
+commands fold to one run, as on QA), records the
 `[post-deploy]` outcome, and **aborts `ship` on a non-zero exit** — the abort
 lands before `ship!`, so the release stays `assembled` (recoverable) and a re-run
 resumes (the command is expected idempotent). On success it stamps `deployed_sha`,

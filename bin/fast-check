@@ -25,6 +25,10 @@
 #   spine  : config/fast_cert_spine.yml — the always-run critical core (~10-20s),
 #            so a diff that maps to nothing still exercises the money paths.
 #            Mapped files already covered by a spine entry run only once.
+#            The list is anchored in the HUB and filtered to paths that exist
+#            under the code root, so a SATELLITE checkout (turf-monster, rolio)
+#            resolves NONE of it — there, the mapped lane is the only lane that
+#            can run a test, which is why the zero-evidence guard exists.
 #   rubocop: the changed files rubocop can lint (never the whole repo).
 #
 # Lanes run from the repo root (the agent's worktree via RepoRoot, so a satellite
@@ -102,7 +106,9 @@
 #   FAST_CHECK_GATE_BIN            gate CLI (default: bin/gate; tests stub it)
 #
 # Exit code: 0 = all lanes green (evidence recorded/printed), 1 = a lane failed,
-# no fingerprint, or the evidence couldn't be recorded.
+# no fingerprint, the evidence couldn't be recorded, or the run would have
+# executed ZERO test files (the zero-evidence guard below — a capped mapped
+# lane over an empty spine certifies nothing, so it does not certify).
 
 require "optparse"
 require "json"
@@ -266,6 +272,30 @@ test_prepare_cmd = ENV.fetch("FAST_CHECK_TEST_PREPARE_CMD", "bin/rails db:test:p
 # not APPLY to it — it is not "skipped" in the opt-out sense. Declared from the
 # registry's gems section, never inferred from whether bin/rails happens to exist.
 skip_test_prepare = ENV.fetch("FAST_CHECK_SKIP_TEST_PREPARE", "") == "1" || gem_repo
+
+# --- the zero-evidence guard ---------------------------------------------------
+# A CERT THAT EXECUTES NO TESTS MUST NOT REPORT GREEN. The cap can skip the mapped
+# lane and the spine can resolve to nothing in the same run — on turf-monster PR
+# #549 it did, and this script printed "fast cert green" over a run whose only
+# executed lane was rubocop. Refuse instead, name why, and name the command that
+# DOES cover the diff, so the BUILDER learns before handoff rather than the
+# REVIEWER learning after. Rationale, and why the guard is keyed on zero executed
+# tests rather than on the cap, in FastCert.zero_test_refusal.
+#
+# DECIDED HERE, BEFORE ANY LANE, because it is a precondition on the SELECTION —
+# the same shape as the root, desk, and dirty-tree guards above, which all abort
+# before the g1_cert attempt is opened. Nothing is recorded and no attempt is
+# stamped: a G1 attempt that ran no lane would report a testing window measuring
+# nothing. Deciding it first also costs the builder ~0s instead of a
+# db:test:prepare they are going to have to redo under another command anyway.
+#
+# NOT FOR A GEM. A gem's registry command IS its suite and runs as the mapped
+# lane, so a gem never has an empty mapped lane to refuse — reading `mapped_only`
+# for one would refuse the repo that runs the MOST.
+unless gem_repo
+  nothing_to_certify = FastCert.zero_test_refusal(mapped_only, spine, cap, slug: slug)
+  abort "fast-check: #{nothing_to_certify}" if nothing_to_certify
+end
 
 # --- the lane ceiling -----------------------------------------------------------
 # NO LANE MAY RUN FOREVER. Measured 2026-08-21: a turf-monster mapped-tests lane sat

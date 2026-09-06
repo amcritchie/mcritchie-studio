@@ -612,6 +612,173 @@ class FastCheckTest < Minitest::Test
     end
   end
 
+  # --- [integration] the zero-evidence guard --------------------------------------
+  #
+  # THE DEFECT, live on turf-monster PR #549 (2026-09-05) and reproduced against this
+  # binary before the fix, verbatim:
+  #
+  #   fast cert green: 0 mapped (CAPPED: 20 mapped path(s) over the cap of 15; spine
+  #   only — bin/full-suite-check covers this diff) + 0 spine test path(s), rubocop on
+  #   1 changed file(s) (0.7s; full suite runs on CI)      exit 0, 0 test lanes invoked
+  #
+  # The mapped lane was capped, so it announced a fallback to the spine; the spine then
+  # resolved to ZERO paths. The cert reported GREEN having run no test at all — rubocop
+  # was the only executed lane, and a linter cannot observe behaviour. It is not an
+  # exotic shape: config/fast_cert_spine.yml is anchored in the HUB, and none of its
+  # entries exist in turf-monster or rolio (verified 2026-09-05, all five absent in
+  # both), so on either satellite the mapped lane is the ONLY lane that can run a test.
+  #
+  # Driven through the script, not the module, because the module decision is half the
+  # fix: the other half is that NOTHING runs, NOTHING is recorded, and the exit code
+  # says so. bin/ship reads output rather than exit codes, so both are asserted.
+
+  # A repo whose spine config resolves to NOTHING — the satellite shape.
+  def with_empty_spine(dir, write)
+    write.call("spine.yml", "spine: []\n")
+    [dir, write]
+  end
+
+  def test_a_capped_lane_over_an_empty_spine_refuses_instead_of_certifying
+    with_wide_mapping_repo do |dir, write|
+      with_empty_spine(dir, write)
+
+      out, code, lines = run_check(dir, merge_stderr: true)
+
+      assert_equal 1, code, "a run that executes no test must not exit 0:\n#{out}"
+      assert_match(/REFUSING TO CERTIFY/, out)
+      refute_match(/fast cert green/, out,
+                   "the exact defect: a green cert over zero executed tests:\n#{out}")
+      refute_match(/\[fast-cert@/, out,
+                   "no evidence line may be emitted — there is no evidence")
+      assert_empty lane_calls(lines, "TEST"), "no test lane ran, which is the point"
+    end
+  end
+
+  # THE REFUSAL IS ACTIONABLE OR IT IS JUST A NEW WAY TO BE STUCK. It names what
+  # tripped it, the culprit file, and the ONE command that covers a diff this broad.
+  def test_the_refusal_names_the_cap_the_culprit_and_the_remedy
+    with_wide_mapping_repo do |dir, write|
+      with_empty_spine(dir, write)
+
+      out, = run_check(dir, merge_stderr: true)
+
+      assert_match(/CAPPED — 20 mapped path\(s\) over the cap of 15/, out)
+      assert_match(%r{widest: config/initializers/widget\.rb}, out)
+      assert_match(/NO spine entries/, out, "the OTHER half of the cause is named too")
+      assert_match(%r{bin/full-suite-check}, out, "the remedy is named")
+      assert_match(/FAST_CHECK_MAPPED_CAP=20/, out, "the deliberate override stays discoverable")
+    end
+  end
+
+  # NOTHING IS RECORDED AND NO G1 ATTEMPT IS STAMPED. The guard is a precondition on the
+  # SELECTION, decided before any lane — like the root, desk, and dirty-tree guards — so
+  # a refused run leaves the board exactly as it found it. An attempt that ran no lane
+  # would otherwise report a testing window that measured nothing.
+  def test_a_refused_run_writes_nothing_to_the_board_or_the_gate
+    with_wide_mapping_repo do |dir, write|
+      with_empty_spine(dir, write)
+
+      _, code, lines = run_check(dir, args: ["some-task"], merge_stderr: true,
+                                 extra_env: { "FAST_CHECK_SKIP_ORPHAN_GUARD" => "1" })
+
+      assert_equal 1, code
+      assert_empty lines.select { |l| l[0] == "TASK" && l[1] == "update" },
+                   "a refused cert must record no evidence: #{lines.inspect}"
+      assert_empty lines.select { |l| l[0] == "GATE" },
+                   "and must stamp no g1_cert attempt: #{lines.inspect}"
+    end
+  end
+
+  # THE OTHER DOOR INTO THE SAME ROOM, and why this guard is keyed on ZERO EXECUTED
+  # TESTS rather than on the cap. Keyed on the cap, a satellite diff mapping to 20 test
+  # files would be refused while one mapping to NONE — strictly LESS evidence — would
+  # still certify green on rubocop alone. Before the fix this printed
+  # "fast cert green: 0 mapped + 0 spine test path(s), rubocop on 0 changed file(s)".
+  def test_a_diff_that_maps_to_nothing_over_an_empty_spine_is_refused_too
+    with_repo do |dir, write|
+      write.call("spine.yml", "spine: []\n")
+      FileUtils.rm_f(File.join(dir, "app/models/widget.rb"))
+      write.call("docs/note.md", "prose only\n")
+
+      out, code, lines = run_check(dir, merge_stderr: true)
+
+      assert_equal 1, code, "zero evidence is zero evidence however it was reached:\n#{out}"
+      assert_match(/maps to NO test file/, out, "the reason given is the REAL one")
+      refute_match(/CAPPED/, out, "no cap tripped — saying so would misdirect the builder")
+      refute_match(/fast cert green/, out)
+      assert_empty lane_calls(lines, "TEST")
+    end
+  end
+
+  # --- and the half that MUST NOT MOVE ---------------------------------------------
+
+  # THE ANY-CAP-DEGRADES RULING, REJECTED AND PINNED. A capped run whose SPINE still ran
+  # executed real tests. It is a NARROWER cert, already labelled honestly by the
+  # "0 mapped (CAPPED: ...)" evidence and the loud MAPPED LANE CAPPED narration — which
+  # is exactly what the cap was designed to produce. Degrading it too would refuse builds
+  # that legitimately certified.
+  def test_a_capped_run_that_still_runs_a_spine_certifies_exactly_as_before
+    with_wide_mapping_repo do |dir, _|
+      out, code, lines = run_check(dir, merge_stderr: true)
+
+      assert_equal 0, code, "the cap alone is not a refusal — it is a narrower cert:\n#{out}"
+      assert_match(/fast cert green: 0 mapped \(CAPPED: \d+ mapped path\(s\) over the cap of 15/, out)
+      refute_match(/REFUSING TO CERTIFY/, out)
+      assert_equal [["test/models/spine_core_test.rb"]], lane_calls(lines, "TEST"),
+                   "the spine still runs, and it is what makes this run certifiable"
+    end
+  end
+
+  # THE ORDINARY BUILD IS UNTOUCHED — the regression that matters. An over-broad guard
+  # that degraded normal certs would be worse than the bug it fixes.
+  def test_an_ordinary_diff_certifies_exactly_as_before
+    with_repo do |dir, _|
+      out, code, lines = run_check(dir, merge_stderr: true)
+
+      assert_equal 0, code, out
+      assert_match(/fast cert green: 1 mapped \+ 1 spine test path\(s\)/, out)
+      refute_match(/REFUSING TO CERTIFY/, out)
+      assert_equal [["test/models/widget_test.rb"], ["test/models/spine_core_test.rb"]],
+                   lane_calls(lines, "TEST"), "both lanes run, unchanged"
+    end
+  end
+
+  # THE OVERRIDE IS NOT A DEAD END. A builder who deliberately raises the cap runs the
+  # mapped lane, executes tests, and certifies — so the refusal always has a way through
+  # that does not require a second command.
+  def test_raising_the_cap_clears_the_refusal_on_an_empty_spine
+    with_wide_mapping_repo do |dir, write|
+      with_empty_spine(dir, write)
+
+      out, code, lines = run_check(dir, merge_stderr: true,
+                                   extra_env: { "FAST_CHECK_MAPPED_CAP" => "500" })
+
+      assert_equal 0, code, "with the mapped lane running there IS evidence:\n#{out}"
+      refute_match(/REFUSING TO CERTIFY/, out)
+      assert_equal 1, lane_calls(lines, "TEST").size, "the mapped lane ran"
+    end
+  end
+
+  # A GEM IS EXEMPT, and the exemption has to be exercised on a diff that WOULD trip the
+  # guard — mapping to nothing, over an empty spine. A gem's registry command IS its
+  # suite and runs as the mapped lane, so reading `mapped_only` for one would refuse the
+  # repo that runs the MOST. Written against a mapping diff first, this test passed
+  # vacuously: `mapped_only` was non-empty and no guard was ever consulted.
+  def test_a_gem_repo_is_never_refused_by_the_zero_evidence_guard
+    with_repo_named("studio-engine", release_check: GEM_GATE_OK) do |dir|
+      File.write(File.join(dir, "spine.yml"), "spine: []\n")
+      FileUtils.rm_f(File.join(dir, "app/models/widget.rb"))
+      FileUtils.mkdir_p(File.join(dir, "docs"))
+      File.write(File.join(dir, "docs/note.md"), "prose only\n")
+
+      out, code = run_check(dir, merge_stderr: true, extra_env: { "FAST_CHECK_TEST_CMD" => nil })
+
+      assert_equal 0, code, "a gem runs its whole registry gate — there is nothing to refuse:\n#{out}"
+      refute_match(/REFUSING TO CERTIFY/, out)
+      assert_match(/whole registry gate/, out, "and it certifies on the gate it actually ran")
+    end
+  end
+
   def test_rubocop_lane_is_scoped_to_changed_lintable_files_only
     with_repo do |dir, _|
       _, code, lines = run_check(dir)

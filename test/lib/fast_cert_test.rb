@@ -343,6 +343,114 @@ class FastCertTest < Minitest::Test
     assert_equal 2, decision[:count]
   end
 
+  # --- [unit] the zero-evidence guard -------------------------------------------
+  #
+  # THE DEFECT, verbatim from turf-monster PR #549's checks_run:
+  #   "fast cert green: 0 mapped (CAPPED: 26 > 15; spine only) + 0 spine test
+  #    path(s), rubocop on 3 changed file(s)"
+  # The mapped lane was capped, the spine resolved to nothing, and the cert
+  # reported GREEN having executed no test at all — rubocop was the only lane, and
+  # a linter cannot observe behaviour.
+
+  # THE SET IS WHAT WILL RUN, NOT WHAT MAPPED. A capped mapped lane contributes
+  # NOTHING here — that difference is the whole guard, and reading `mapped_only`
+  # regardless is exactly how the green cert was issued.
+  def test_a_capped_mapped_lane_contributes_no_executed_paths
+    mapped = (1..20).map { |i| "test/lib/t#{i}_test.rb" }
+    capped = FastCert.cap_decision(mapped, { "config/initializers/studio.rb" => mapped })
+
+    assert_equal ["test/models/spine_core_test.rb"],
+                 FastCert.executed_test_paths(mapped, ["test/models/spine_core_test.rb"], capped),
+                 "the capped lane runs nothing, so only the spine is executed"
+    assert_empty FastCert.executed_test_paths(mapped, [], capped),
+                 "capped mapped lane + empty spine = no test file is executed at all"
+  end
+
+  def test_an_uncapped_mapped_lane_contributes_its_paths
+    mapped = ["test/models/widget_test.rb"]
+    decision = FastCert.cap_decision(mapped, { "app/models/widget.rb" => mapped })
+
+    assert_equal ["test/models/widget_test.rb", "test/models/spine_core_test.rb"],
+                 FastCert.executed_test_paths(mapped, ["test/models/spine_core_test.rb"], decision)
+    assert_equal ["test/models/widget_test.rb"],
+                 FastCert.executed_test_paths(mapped, [], decision),
+                 "an empty spine is survivable — the mapped lane still executed a test"
+  end
+
+  # A path in BOTH lanes is executed once, so the count of executed paths cannot be
+  # inflated by the dedupe's leftovers.
+  def test_executed_paths_are_deduped_across_the_two_lanes
+    mapped = ["test/models/widget_test.rb"]
+    decision = FastCert.cap_decision(mapped, { "app/models/widget.rb" => mapped })
+
+    assert_equal ["test/models/widget_test.rb"],
+                 FastCert.executed_test_paths(mapped, ["test/models/widget_test.rb"], decision)
+  end
+
+  # --- the refusal itself --------------------------------------------------------
+
+  def test_a_capped_lane_over_an_empty_spine_is_refused_and_names_the_culprit
+    mapped = (1..26).map { |i| "test/lib/t#{i}_test.rb" }
+    capped = FastCert.cap_decision(mapped, { "app/services/solana/config.rb" => mapped })
+
+    refusal = FastCert.zero_test_refusal(mapped, [], capped, slug: "some-task")
+
+    refute_nil refusal, "the PR #549 shape must NOT certify"
+    assert_match(/REFUSING TO CERTIFY/, refusal)
+    assert_match(/ZERO test files/, refusal)
+    assert_match(/CAPPED — 26 mapped path\(s\) over the cap of 15/, refusal,
+                 "the builder is told what tripped it")
+    assert_match(%r{widest: app/services/solana/config\.rb}, refusal, "and which file caused it")
+    assert_match(%r{bin/full-suite-check some-task}, refusal,
+                 "the remedy is NAMED, for THIS task — that is what makes the builder able to act")
+    assert_match(/FAST_CHECK_MAPPED_CAP=26/, refusal, "the deliberate override stays discoverable")
+  end
+
+  # THE OTHER DOOR INTO THE SAME ROOM. Keyed on the CAP, a satellite diff mapping to
+  # 26 test files would be refused while one mapping to NONE — strictly LESS evidence
+  # — would still certify green on rubocop alone. The guard is keyed on the zero.
+  def test_a_diff_that_maps_to_nothing_over_an_empty_spine_is_refused_too
+    refusal = FastCert.zero_test_refusal([], [], FastCert.cap_decision([], {}), slug: "some-task")
+
+    refute_nil refusal, "zero executed tests is zero evidence however it was reached"
+    assert_match(/maps to NO test file/, refusal, "the reason given must be the REAL one, not the cap")
+    refute_match(/CAPPED/, refusal, "no cap was involved — saying so would misdirect the builder")
+    refute_match(/FAST_CHECK_MAPPED_CAP/, refusal,
+                 "raising a cap that never tripped fixes nothing; offering it is a dead end")
+    assert_match(%r{bin/full-suite-check some-task}, refusal)
+  end
+
+  # WITHOUT A SLUG (bin/fast-check --print, or a hook) the remedy still has to be
+  # copyable, so it degrades to the placeholder rather than to "bin/full-suite-check ".
+  def test_the_refusal_without_a_slug_still_prints_a_usable_command
+    refusal = FastCert.zero_test_refusal([], [], FastCert.cap_decision([], {}))
+
+    assert_match(%r{bin/full-suite-check <task>}, refusal)
+  end
+
+  # AND THE HALF THAT MUST NOT MOVE. A capped run whose SPINE still ran executed real
+  # tests: it is a NARROWER cert, honestly labelled by the existing "0 mapped
+  # (CAPPED: ...)" evidence, and refusing it would degrade builds that legitimately
+  # certified. This is the any-cap-degrades ruling, rejected, pinned as a test.
+  def test_a_capped_lane_with_a_LIVE_spine_still_certifies
+    mapped = (1..26).map { |i| "test/lib/t#{i}_test.rb" }
+    capped = FastCert.cap_decision(mapped, { "app/services/solana/config.rb" => mapped })
+
+    assert_nil FastCert.zero_test_refusal(mapped, ["test/models/task_test.rb"], capped),
+               "the spine ran real tests — a cap alone must not degrade the verdict"
+  end
+
+  def test_an_ordinary_diff_is_never_refused
+    mapped = ["test/models/widget_test.rb"]
+    decision = FastCert.cap_decision(mapped, { "app/models/widget.rb" => mapped })
+
+    assert_nil FastCert.zero_test_refusal(mapped, ["test/models/task_test.rb"], decision)
+    assert_nil FastCert.zero_test_refusal(mapped, [], decision),
+               "a mapped lane that runs is evidence, spine or no spine"
+    assert_nil FastCert.zero_test_refusal([], ["test/models/task_test.rb"], decision),
+               "a spine that runs is evidence, mapping or no mapping"
+  end
+
   def with_env(pairs)
     previous = pairs.keys.to_h { |k| [k, ENV[k]] }
     pairs.each { |k, v| ENV[k] = v }

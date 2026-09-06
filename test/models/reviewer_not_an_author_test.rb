@@ -137,8 +137,15 @@ class ReviewerNotAnAuthorTest < ActiveSupport::TestCase
     # rule 1 re-points built_by to an explicit soul actor, so a review write made
     # with `--agent carl` would have recorded CARL as the builder of a PR he
     # reviewed — an author set that is confidently WRONG rather than merely
-    # incomplete. This is why the seam suppresses the whole claim, not just the
-    # unattributed branch.
+    # incomplete.
+    #
+    # THE PROPERTY IS built_by, AND ONLY built_by. This test also asserted that carl
+    # stayed OUT of devops.builders, and that half was pinning the implementation
+    # rather than the property: suppressing the whole claim dropped a soul-named
+    # write with no record of it anywhere, which is the silent hole
+    # test/models/reviewer_turned_builder_test.rb now covers. He is recorded as an
+    # AUTHOR (over-counting over-EXCLUDES, so it refuses rather than seats) and still
+    # never as the builder.
     task = submitted_task
     reviewing!(task)
     block_for_rework!(task)
@@ -151,8 +158,9 @@ class ReviewerNotAnAuthorTest < ActiveSupport::TestCase
     Current.reset
 
     assert_equal "shannon", task.reload.devops["built_by"],
-                 "the reviewer named himself on a review write, not a build claim"
-    assert_equal ["shannon"], authors(task)
+                 "the reviewer named himself, and that never re-points the builder"
+    assert_equal ["shannon", "carl"], authors(task),
+                 "but it is on record, because a claim nobody can see is the worse failure"
   end
 
   # --- THE TRANSITION TRAIL, WHICH READS AUTHORS TOO --------------------------

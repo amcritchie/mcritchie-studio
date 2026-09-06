@@ -56,14 +56,22 @@ class DorCheckExemptCiTest < Minitest::Test
   # Runs dor-check against an in-memory task, returns [parsed_json, exitcode].
   # STDOUT only: the child inherits bundler's env under `bin/rails test` and emits
   # rubygems warnings on STDERR, which would corrupt the --json parse if merged.
-  def check(devops_payload, ci: nil, role: "review", changed: DOC_DIFF, gate_bin: nil, args: "--json")
+  # `pr_files:` defaults to the SAME list the diff is injected from — the readable
+  # world, where the PR read succeeded and the exemption is proven against the PR
+  # itself. Pass "unreadable"/"unverified" to drive the FAILED-read worlds, where a
+  # non-PR source stands in and the exemption would otherwise be granted against an
+  # artifact nobody asked about. It is a separate dimension from `changed:` for the
+  # reason refusal()'s header states: a fixture that can only vary them together
+  # cannot express the failure it is pinning.
+  def check(devops_payload, ci: nil, role: "review", changed: DOC_DIFF, gate_bin: nil, args: "--json",
+            pr_files: nil)
     Dir.mktmpdir do |dir|
       path = File.join(dir, "task.json")
       File.write(path, JSON.generate("slug" => "exempt-task", "title" => "T",
                                      "metadata" => { "devops" => devops_payload }))
       env = OutboundSeams.env({
         "DOR_CHECK_DIFF_ROOT" => dir, "DOR_CHECK_DIFF_BASE" => "HEAD",
-        "DOR_CHECK_CHANGED_FILES" => changed, "DOR_CHECK_PR_FILES" => changed,
+        "DOR_CHECK_CHANGED_FILES" => changed, "DOR_CHECK_PR_FILES" => pr_files || changed,
         "DOR_CHECK_CI_STATUS" => ci, "DOR_CHECK_GATE_BIN" => gate_bin
       }.compact)
       out = IO.popen(env, "#{BIN} exempt-task --file #{path} #{args} --gate-role #{role} 2>/dev/null", &:read)
@@ -219,6 +227,161 @@ class DorCheckExemptCiTest < Minitest::Test
     red, red_code = check(devops, ci: "red", role: "builder")
     assert_equal 1, red_code, "a RED CI blocks in BOTH roles"
     assert_includes errors_of(red), "GitHub CI is RED"
+  end
+
+  # ── the exempt path must CONFIRM that it IS exempt ─────────────────────────
+  #
+  # THE HOLE (/tasks/exempt-path-trusts-local-tree). The gated path role-splits a
+  # failed PR-file read — ERROR for review, SUGGESTION for the builder — because the
+  # reviewer's checkout is deliberately NOT the task's tree, so grading a substitute
+  # there is the false pass gate-zero exists to refuse. The EXEMPT path had no such
+  # split: `pr_read_alert` landed in `suggestions` for BOTH roles, so a doc-only
+  # exemption could be earned from whatever tree the reviewer happened to be standing
+  # in while the PR itself went unread. Measured on this branch before the fix: the
+  # review and builder verdicts came back byte-identical, both `✓ … → ready to
+  # advance submitted → reviewed`, off `[source: git working tree]`.
+  #
+  # SISTER DEFECT TO /tasks/gate-zero-skips-docs-ci, one door out. That one was "the
+  # exempt path never asks CI"; this is "the exempt path never confirms it IS exempt."
+  # Both let a review gate pass on evidence it did not actually read.
+  #
+  # BOTH FAILED-READ STATES, because only one of them was ever closed. A REVIEW-role
+  # `:unreadable` is caught upstream in resolve_branch_diff (diff_source
+  # :pr_unreadable → nothing observed → the "could not be proven doc-only" refusal),
+  # but `:unverified` — gh missing, a 404, a transport error, an API outage — is a
+  # FAILED read too, and it was never in that guard: it fell through to the local
+  # working tree and reached the grant. Pinning only the credential state would
+  # re-close the door that was already shut and leave the open one open.
+  FAILED_PR_READS = %w[unreadable unverified].freeze
+
+  def test_a_failed_pr_file_read_refuses_the_review_exemption
+    # THE CONTROL FIRST, so this test cannot pass by refusing everything: the same
+    # task, the same green CI, a READABLE PR file list — still exempt, still ready.
+    readable, readable_code = check(devops, ci: "green", role: "review")
+    assert_equal 0, readable_code, "a readable PR read must still earn the exemption:\n#{readable}"
+    assert readable["ready"], "the control must pass, or the assertions below prove nothing"
+
+    FAILED_PR_READS.each do |state|
+      verdict, code = check(devops, ci: "green", role: "review", pr_files: state)
+
+      assert_equal 1, code, "review + pr_files:#{state} must REFUSE the exemption:\n#{verdict}"
+      refute verdict["ready"], "pr_files:#{state} — a gate that did not read the PR is not ready"
+      assert_includes errors_of(verdict), ALERT_MARK,
+                      "pr_files:#{state} — the refusal must be an ERROR, not a suggestion"
+      assert_empty Array(verdict["suggestions"]).grep(/#{ALERT_MARK}/),
+                   "pr_files:#{state} — the alert must MOVE to errors, not be printed twice"
+    end
+  end
+
+  # THE FENCE (acceptance 2). The builder's local-tree fallback is DELIBERATE: they
+  # stand in the task's own worktree, where the local view is the honest near-twin of
+  # the PR, and their verdict is provisional by design. A fix that refused both roles
+  # would stall every docs handoff behind an hour-old App token and buy no integrity.
+  # Same unreadable input as the test above — only the role differs.
+  def test_the_builder_role_keeps_its_local_tree_fallback_on_a_failed_pr_read
+    FAILED_PR_READS.each do |state|
+      verdict, code = check(devops, ci: "green", role: "builder", pr_files: state)
+
+      assert_equal 0, code, "submit-side pr_files:#{state} must stay provisional:\n#{verdict}"
+      assert verdict["ready"], "pr_files:#{state} — the builder's exemption still stands"
+      assert_empty Array(verdict["errors"]), "pr_files:#{state} — nothing is an error submit-side"
+      assert_includes Array(verdict["suggestions"]).join(" "), ALERT_MARK,
+                      "pr_files:#{state} — but the substitution is NAMED, never silent"
+    end
+  end
+
+  # THE RECEIPT SURVIVES THE PROMOTION. `pr_read` is how a monitor asks "was the PR
+  # actually read?" of a verdict after the fact, and it used to be keyed off the
+  # SUGGESTION list — so promoting the alert to an error would have blanked the field
+  # in exactly the role where it matters most. Keyed off the refusal itself now.
+  # THE BUILD GATE STAYS LENIENT, review role or not — the clause that says so must
+  # not be inert. Measured: removing `gate != "build"` from the role split left every
+  # other test in this file green, which is precisely the half-inert guard this task's
+  # own discipline warns about. The build gate resolves no diff and must not shell
+  # `gh`, so a PR read that failed there is not evidence of anything; line 2356's
+  # gated-path twin carries the same clause for the same reason.
+  def test_the_build_gate_never_refuses_on_a_failed_pr_read
+    FAILED_PR_READS.each do |state|
+      verdict, code = check(devops, role: "review", pr_files: state, args: "--json --gate build")
+
+      assert_equal 0, code, "the build gate has no PR to judge (pr_files:#{state}):\n#{verdict}"
+      assert_empty Array(verdict["errors"]), "pr_files:#{state} — nothing is an error at the build gate"
+    end
+  end
+
+  def test_the_refused_read_is_recorded_on_the_exempt_payload_in_both_roles
+    %w[review builder].each do |role|
+      verdict, = check(devops, ci: "green", role: role, pr_files: "unverified")
+      assert_equal "unverified", verdict.dig("pr_read", "state"),
+                   "#{role}: the payload must record WHICH read failed"
+    end
+  end
+
+  # ── [integration] the world the defect actually lived in ───────────────────
+  #
+  # Every case above injects the diff (DOR_CHECK_CHANGED_FILES), which is the
+  # deterministic seam but NOT the shape of the bug: it short-circuits the resolver
+  # before any fallback happens. Here the seam is absent and a REAL git tree stands
+  # in — one dirty, unrelated prose file in a checkout that is not the PR. That is
+  # the hub PRIMARY on a review night, and the file is the one that actually did it
+  # on 2026-08-08: docs/agents/maintenance/delete-later.md.
+  DIRTY_PROSE = "docs/agents/maintenance/delete-later.md"
+
+  # A checkout whose only change is one unrelated prose file — no injected diff, so
+  # the gate must fall back to (or refuse) the working tree. The task file lives
+  # OUTSIDE the repo: inside, it reads as a code diff and the exemption never applies.
+  def with_prose_only_checkout(role:, pr_files:)
+    Dir.mktmpdir do |dir|
+      system("git", "-C", dir, "init", "-q", out: File::NULL, err: File::NULL)
+      system("git", "-C", dir, "config", "user.email", "t@t.t", out: File::NULL, err: File::NULL)
+      system("git", "-C", dir, "config", "user.name", "T", out: File::NULL, err: File::NULL)
+      File.write(File.join(dir, "README.md"), "base\n")
+      system("git", "-C", dir, "add", "-A", out: File::NULL, err: File::NULL)
+      system("git", "-C", dir, "commit", "-qm", "base", out: File::NULL, err: File::NULL)
+      FileUtils.mkdir_p(File.join(dir, File.dirname(DIRTY_PROSE)))
+      File.write(File.join(dir, DIRTY_PROSE), "one unrelated dirty note\n")
+
+      Dir.mktmpdir do |taskdir|
+        file = File.join(taskdir, "task.json")
+        File.write(file, JSON.generate("slug" => "exempt-task", "title" => "T",
+                                       "metadata" => { "devops" => devops }))
+        env = OutboundSeams.env({
+          "DOR_CHECK_DIFF_ROOT" => dir, "DOR_CHECK_DIFF_BASE" => "HEAD",
+          "DOR_CHECK_PR_FILES" => pr_files, "DOR_CHECK_CI_STATUS" => "green"
+        })
+        out = IO.popen(env, "#{BIN} exempt-task --file #{file} --gate-role #{role} 2>/dev/null", &:read)
+        yield out, $?.exitstatus
+      end
+    end
+  end
+
+  def test_a_reviewer_standing_in_a_foreign_prose_dirty_checkout_is_refused
+    with_prose_only_checkout(role: "review", pr_files: "unverified") do |out, code|
+      assert_equal 1, code, "the 2026-08-08 shape must REFUSE in the review role:\n#{out}"
+      refute_includes out, "\u2192 ready to advance",
+                      "a doc-only exemption earned off an unread PR is the false pass:\n#{out}"
+      assert_includes out, ALERT_MARK
+      # AND THE CLOSING LINE MUST NAME THE RIGHT REFUSAL. CI is GREEN in this
+      # fixture, so a verdict that signs off "this refusal is the CI verdict" is
+      # pointing the reader at the one thing that did not fail.
+      assert_includes out, "the PR's own file list going unread",
+                      "the refusal must say WHICH half refused:\n#{out}"
+      refute_includes out, "the CI verdict, which an exempt diff does not escape",
+                      "CI is green here — blaming it is the misnamed-refusal defect:\n#{out}"
+    end
+  end
+
+  # THE SAME TREE, THE SAME REFUSED READ, THE BUILDER ROLE — still granted, and still
+  # NAMED. This is the pair that proves the fix is role-scoped rather than a blanket
+  # offline refusal, on input identical but for --gate-role.
+  def test_the_same_tree_still_earns_the_builders_provisional_exemption
+    with_prose_only_checkout(role: "builder", pr_files: "unverified") do |out, code|
+      assert_equal 0, code, "the builder's provisional fallback must survive:\n#{out}"
+      assert_includes out, "[source: git working tree]",
+                       "the fixture must actually exercise the local-tree fallback:\n#{out}"
+      assert_includes out, "ready to advance"
+      assert_includes out, ALERT_MARK
+    end
   end
 
   # ── the half that must stay skipped ────────────────────────────────────────

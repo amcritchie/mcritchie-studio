@@ -1908,7 +1908,43 @@ if EXEMPT_KINDS.include?(kind)
     # alert's OFFER four lines apart, and adding a full cert left the whole run
     # byte-identical. Measured on this branch before the fix; the property test's
     # `refute_equal offered, denied` names that state directly.
-    exempt_alerts = [pr_read_alert(cert_route: false)].compact
+    #
+    # AND THE EXEMPTION MUST BE PROVEN AGAINST THE PR, NOT MERELY ANNOUNCED
+    # (/tasks/exempt-path-trusts-local-tree). The alert above used to land in
+    # `suggestions` for BOTH roles, and that is the second half of the 08-08 false
+    # pass: the gated path role-splits a refused PR read (an ERROR in review, a
+    # SUGGESTION submit-side — see the block near the end of this file), because the
+    # reviewer's checkout is deliberately NOT the task's tree; this path never got
+    # that split. So a doc-only exemption could be EARNED from whatever tree the
+    # reviewer happened to be standing in while the PR itself went unread, and the
+    # review and builder verdicts came back byte-identical — both "✓ … → ready to
+    # advance", off "[source: git working tree]". Sister defect to
+    # /tasks/gate-zero-skips-docs-ci, one door out: that one was "the exempt path
+    # never asks CI", this is "the exempt path never confirms it IS exempt."
+    #
+    # WHY THE FIX IS HERE AND NOT IN resolve_branch_diff. That resolver already
+    # refuses a REVIEW-role :unreadable (diff_source :pr_unreadable). It does not
+    # refuse :unverified — gh missing, a 404, a transport error, an API outage — and
+    # widening it to would be wrong twice: the :pr_unreadable refusal speaks in
+    # credential language ("REFUSED on credentials", "eval $(bin/gh-auth-refresh)"),
+    # which is a lie about a transport fault, and it would drag the GATED path along
+    # with it for no gain, since the gated path already refuses both states correctly.
+    # The missing guard is the ROLE SPLIT on this branch, so that is what is added.
+    # It also covers :unreadable here, which the resolver only catches when no diff
+    # was injected — defence in depth on the one branch that grants an exemption.
+    #
+    # THE BUILDER'S FALLBACK IS DELIBERATE AND STAYS. They stand in the task's OWN
+    # worktree, where the local view is the honest near-twin of the PR, and their
+    # verdict is provisional by design (review re-runs it). Refusing both roles would
+    # stall every docs handoff behind an hour-old App token and buy no integrity —
+    # the same reasoning resolve_branch_diff and the gated path both already record.
+    # Not evaluated at the build gate, which resolves no diff and must not shell `gh`.
+    pr_read_refusal = pr_read_alert(cert_route: false)
+    exempt_alerts = []
+    exempt_pr_read_errors = []
+    if pr_read_refusal
+      (review_role && gate != "build" ? exempt_pr_read_errors : exempt_alerts) << pr_read_refusal
+    end
 
     # ==== THE EXEMPTION IS FROM THE TIER GATE. IT WAS NEVER FROM CI ============
     #
@@ -1973,7 +2009,10 @@ if EXEMPT_KINDS.include?(kind)
             "cert_route here must read the policy note above first (/tasks/exempt-refusal-prints-dead-remedy)."
     end
     exempt_alerts.concat(exempt_ci_notes)
-    exempt_errors = [exempt_ci_error].compact
+    # CI FIRST, the PR-read refusal second: one stale token refuses both reads, and
+    # when they co-fire the CI verdict is the one that has always led this refusal.
+    # Reordering it would change the headline of every existing exempt refusal.
+    exempt_errors = [exempt_ci_error].compact + exempt_pr_read_errors
     exempt_ready = exempt_errors.empty?
     exempt_ci_result = CiGate.gate_row(exempt_ci, review_role: review_role,
                                              review_refused: review_role && !exempt_ready)
@@ -2006,7 +2045,12 @@ if EXEMPT_KINDS.include?(kind)
         code_root: diff_root,
         code_files: [],
         changed_files: observed,
-        pr_read: exempt_alerts.empty? ? nil : pr_file_read.slice(:state, :cause, :reason).compact,
+        # KEYED OFF THE REFUSAL, NOT OFF `suggestions`. This is how a monitor asks
+        # "was the PR actually read?" of an exempt verdict after the fact — and the
+        # role split above moves the alert OUT of exempt_alerts in the review role,
+        # which is exactly the role where the answer matters most. Reading the old
+        # list here would have blanked the field on the fixed path.
+        pr_read: pr_read_refusal ? pr_file_read.slice(:state, :cause, :reason).compact : nil,
         note: note,
         errors: exempt_errors,
         suggestions: exempt_alerts,
@@ -2034,8 +2078,23 @@ if EXEMPT_KINDS.include?(kind)
       else
         puts "✗ #{gate_label} NOT met for #{title.inspect}"
         exempt_errors.each { |e| puts "  - #{e}" }
+        # NAME WHICH REFUSAL THIS IS. The line used to assert flatly that the refusal
+        # was "the CI verdict" — true while CI was the only thing that could refuse
+        # on this path, and false the moment the PR-read refusal joined it
+        # (/tasks/exempt-path-trusts-local-tree): a GREEN CI plus an unread PR printed
+        # a refusal whose closing line blamed CI. A closing line that misnames the
+        # error above it sends the reader to the wrong fix — the same defect family as
+        # the dead cert remedy this path removed one task ago. Derived from the two
+        # error lists themselves, so a future third reason cannot silently inherit
+        # CI's sentence. Never empty: !exempt_ready holds exactly when one of them is.
+        refused_by = []
+        refused_by << "the CI verdict, which an exempt diff does not escape" if exempt_ci_error
+        unless exempt_pr_read_errors.empty?
+          refused_by << "the PR's own file list going unread, so the doc-only exemption was never proven " \
+                        "against the artifact this gate judges"
+        end
         puts "  → the shape/test-tier gate IS waived (the OBSERVED diff ships no behavior) — this refusal is " \
-             "the CI verdict, which an exempt diff does not escape"
+             "#{refused_by.join(' AND ')}"
         puts "  → not ready to advance #{boundary}; resolve the above"
       end
       exempt_alerts.each { |a| puts "  ⓘ suggestion: #{a}" }

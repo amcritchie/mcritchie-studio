@@ -404,14 +404,32 @@ class DorCheckReviewDiffRootingTest < Minitest::Test
     # honest chore. Re-rooting has to fix the tree, not the answer: the exemption must
     # still be granted, and granted on the TASK's files.
     with_world(files: ["docs/agents/modules/heartbeats.md"], dirt: ["app/services/rogue.rb"]) do |projects, primary, _tree|
-      verdict, code, = dor_check(chore_task, primary, projects, "--gate-role", "review")
+      # THE GRANT IS SUBMIT-SIDE, and since /tasks/exempt-path-trusts-local-tree that
+      # is the only role that grants it off a local view. A REVIEW-role run whose PR
+      # file list could not be read no longer earns the doc-only exemption from ANY
+      # local tree, however well re-rooted. That is not new policy — it is what
+      # :unreadable has always done on this path (flip `pr_files:` to "unreadable"
+      # below against the pre-fix binary and this very assertion failed); :unverified
+      # was simply the failed-read state that escaped the rule.
+      granted, code, = dor_check(chore_task, primary, projects, "--gate-role", "builder")
 
-      assert_equal 0, code, "a doc-only PR must still pass: #{verdict['errors']}"
-      assert verdict["ready"]
-      assert verdict["exempt"]
-      assert_equal ["docs/agents/modules/heartbeats.md"], verdict["changed_files"]
-      refute_includes Array(verdict["changed_files"]), "app/services/rogue.rb",
-                      "the primary's dirty code must not be blamed on this task either"
+      assert_equal 0, code, "a doc-only PR must still pass submit-side: #{granted['errors']}"
+      assert granted["ready"]
+      assert granted["exempt"]
+      assert_equal ["docs/agents/modules/heartbeats.md"], granted["changed_files"]
+
+      # AND THE OVER-REFUSAL GUARD SURVIVES IN BOTH ROLES, which is this test's actual
+      # subject. The review-role refusal must be about the UNREAD PR, never about a
+      # bad root: a run that re-rooted wrongly would name the primary's rogue file.
+      refused, refused_code, = dor_check(chore_task, primary, projects, "--gate-role", "review")
+
+      assert_equal 1, refused_code, "an unread PR is not proof of doc-only for review"
+      assert_equal ["docs/agents/modules/heartbeats.md"], refused["changed_files"],
+                   "the refusal must still have re-rooted onto the task's own tree"
+      [granted, refused].each do |verdict|
+        refute_includes Array(verdict["changed_files"]), "app/services/rogue.rb",
+                        "the primary's dirty code must not be blamed on this task either"
+      end
     end
   end
 
@@ -892,7 +910,11 @@ class DorCheckReviewDiffRootingTest < Minitest::Test
     # false pass actually took was the one a monitor could not check. Both exempt
     # payloads (the pass and the fail-closed) must carry it.
     with_world(files: ["docs/agents/modules/heartbeats.md"], dirt: []) do |projects, primary, tree|
-      passing, code, = dor_check(chore_task, primary, projects, "--gate-role", "review")
+      # Submit-side, because the PASS is the shape under test and a review-role run
+      # with an unread PR file list no longer produces one
+      # (/tasks/exempt-path-trusts-local-tree). The fail-closed half below stays in
+      # the review role, where it always refused.
+      passing, code, = dor_check(chore_task, primary, projects, "--gate-role", "builder")
       assert_equal 0, code
       assert passing["exempt"]
       assert_equal tree, passing["code_root"], "the doc-only PASS must name the tree it read"

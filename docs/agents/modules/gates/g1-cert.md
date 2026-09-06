@@ -191,9 +191,41 @@ impossible by construction rather than by every repo remembering to ignore `tmp/
      cert is `bin/full-suite-check`; raise the cap deliberately with
      `FAST_CHECK_MAPPED_CAP=<n>`.
    - `spine` — `bin/rails test <config/fast_cert_spine.yml entries>` (the
-     always-run critical core, ~10-20s)
+     always-run critical core, ~10-20s). **The list is anchored in the HUB** and
+     filtered to paths that exist under the code root, so a SATELLITE checkout
+     resolves NONE of it — verified 2026-09-05: all five entries are absent from
+     both turf-monster and rolio. On a satellite the mapped lane is therefore the
+     only lane that can run a test at all, which is what makes the guard below
+     more than a corner case.
    - `rubocop-changed` — `bin/rubocop <changed lintable files>` (never the
      whole repo; skipped when none)
+
+   **A CERT THAT EXECUTES ZERO TEST FILES DOES NOT CERTIFY.** Before any lane
+   runs, `bin/fast-check` counts the test paths this run will actually execute —
+   the mapped lane (EMPTY when the cap skipped it) plus the spine — and REFUSES
+   with exit 1 when that set is empty, naming what tripped it, the widest-mapping
+   file when a cap did, and `bin/full-suite-check <task>` as the remedy. Nothing
+   is recorded and no `g1_cert` attempt is stamped; it is a precondition on the
+   SELECTION, the same shape as the root, desk, and dirty-tree guards.
+
+   It exists because turf-monster PR #549 recorded this, verbatim:
+   `fast cert green: 0 mapped (CAPPED: 26 > 15; spine only) + 0 spine test
+   path(s), rubocop on 3 changed file(s)`. The mapped lane was capped, so it
+   announced a fallback to the spine; the spine then resolved to zero paths. The
+   gate printed **green** having run no test at all — rubocop was the only
+   executed lane, and a linter cannot observe behaviour. Three of five builds
+   that night degraded this way and every reviewer had to be told by hand to
+   weight CI over the G1 cert.
+
+   **Keyed on the zero, not on the cap** — deliberately. Keyed on the cap, a
+   satellite diff mapping to 26 test files would be refused while one mapping to
+   NONE, strictly less evidence, would still certify green on rubocop alone.
+   **A capped run whose spine still ran is NOT refused**: it executed real tests
+   and its evidence already reads `0 mapped (CAPPED: …)` beside the loud
+   `MAPPED LANE CAPPED` narration — a narrower cert, honestly labelled, which is
+   what the cap was designed to produce. A gem repo is exempt (its registry
+   command IS its suite and runs as the mapped lane). **The cap itself is
+   unchanged**: this alters what a capped run REPORTS, never how much it runs.
 
    All lanes green stamps one `[fast-cert@<fp>]` line into `checks_run`,
    merged with the existing list (tier tags and full-suite evidence are

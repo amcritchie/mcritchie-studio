@@ -428,7 +428,14 @@ Supported fields:
 | `acceptance` | Acceptance criteria, one item per line |
 | `test_plan` | Checks the feature agent expects to run, one item per line |
 | `checks_run` | Checks actually completed before the current handoff, one item per line |
-| `post_deploy_cmd` | Command `bin/release` runs **verbatim against the deployed app** (QA on `prepare`, prod on `ship`) after migrations, so a seed/backfill isn't run by hand. Must be **narrow, prod-safe, and idempotent** — **never a bare `db:seed`** (see safety rule below). Set to `none` to acknowledge a schema-only migration that needs no command. |
+| `post_deploy_cmd` | Command `bin/release` runs **verbatim against the deployed app** (QA on `prepare`, prod on `ship`) after migrations, so a seed/backfill isn't run by hand. Must be **narrow, prod-safe, and idempotent** — **never a bare `db:seed`** (see safety rule below). Set to `none` to acknowledge a schema-only migration that needs no command. Two members declaring the same work run **once**: the plan folds the interchangeable `rake` and `bin/rails` spellings and stamps the `[post-deploy]` check on both. |
+
+**The command's EXIT STATUS is its verdict.** `bin/release` runs it under
+`heroku run --exit-code` and reads nothing else — not its output. A command that
+prints its own failure and exits 0 records the hook **GREEN** and the release
+ships past it. So a command that can partially fail must compare what it did
+against what it should have done and exit non-zero on the shortfall;
+`tasks:backfill_testing_phases` is the worked example.
 
 **`post_deploy_cmd` safety rule.** Because `bin/release` runs the command
 verbatim against PRODUCTION, `bin/dor-check` **rejects** a bare full-suite seed

@@ -473,10 +473,13 @@ class ReviewerSelector
   #
   # Three sources, unioned so a task stamped before the accumulator existed still
   # yields its authors: devops.built_by (the current builder), devops.builders (the
-  # server-owned append-only claim history), and EVERY `→ building` event actor that
-  # names a soul — the last being the persisted-task self-heal, since the CLI builds
-  # an in-memory Task from board JSON and never sees events at all. built_by leads,
-  # so #builders.first is #builder in the ordinary single-author case.
+  # server-owned append-only claim history), and every `→ building` event actor that
+  # names a soul AND is a build CLAIM — a rework block lands the task back on
+  # `building` too, and that transition's actor is the reviewer who bounced it, so
+  # #building_claim_events skips it. The events are the persisted-task self-heal,
+  # since the CLI builds an in-memory Task from board JSON and never sees events at
+  # all. built_by leads, so #builders.first is #builder in the ordinary
+  # single-author case.
   def builders
     return @builders if defined?(@builders)
 
@@ -643,39 +646,46 @@ class ReviewerSelector
     task.respond_to?(:devops_built_by) ? task.devops_built_by.to_s.strip.presence : nil
   end
 
-  # The actor on the most recent `→ building` transition — the build claim. Only
-  # for a persisted task (the CLI's in-memory stand-in has no events). Any lookup
-  # error degrades to nil so selection never depends on the events being readable.
-  def building_event_actor
-    return nil unless task.respond_to?(:task_events) && task.try(:persisted?)
+  # EVERY `→ building` transition that is a BUILD CLAIM, oldest first — the one
+  # query both event readers below are views onto.
+  #
+  # A BLOCK's transition is skipped: Task#block! lands a bounced task back on
+  # `building`, so a rework block writes a `→ building` event whose actor is the
+  # REVIEWER who sent the work back. Counted as a build claim, that read the
+  # reviewer into the author set — after a bounce #builders returned ["shannon",
+  # "carl"], excluding the reviewer from the task's own pool and naming him in the
+  # audit as an author of a diff he only read. See TaskEvent#block_transition?,
+  # which also explains why legacy rows (written before the marker) still count.
+  #
+  # THE TWO READERS SHARE THIS ON PURPOSE. They were written as two copies of one
+  # query, and PR #1214 taught only the plural one to skip a block — so the
+  # singular one went on resolving to the reviewer after a bounce for as long as the
+  # copies could drift apart. One source means they cannot.
+  #
+  # Persisted tasks only (the CLI's in-memory stand-in carries no events, which is
+  # why the accumulator has to live in devops), and any lookup error degrades to
+  # empty so selection never depends on the events being readable.
+  def building_claim_events
+    return [] unless task.respond_to?(:task_events) && task.try(:persisted?)
 
     task.task_events.where(to_stage: "building").where.not(actor: [nil, ""])
-        .order(:occurred_at, :id).last&.actor.to_s.strip.presence
+        .order(:occurred_at, :id).reject(&:block_transition?)
   rescue StandardError
-    nil
+    []
+  end
+
+  # The actor on the most recent build CLAIM — the current builder, as #builder
+  # reads it. A bounce is not a claim, so it cannot answer this (see above).
+  def building_event_actor
+    building_claim_events.last&.actor.to_s.strip.presence
   end
 
   # EVERY soul who claimed the build, oldest first — the same events the singular
   # reader above takes only the last of. A handoff writes a second `→ building`
   # event, so this is where a task built before devops.builders existed still gives
-  # up both its authors. Persisted tasks only (the CLI's in-memory stand-in carries
-  # no events, which is why the accumulator has to live in devops), and any lookup
-  # error degrades to empty so selection never depends on the events being readable.
-  # A BLOCK's transition is skipped: Task#block! lands a bounced task back on
-  # `building`, so a rework block writes a `→ building` event whose actor is the
-  # REVIEWER who sent the work back. Counted as a build claim, that read the
-  # reviewer into the author set — after a bounce this returned ["shannon",
-  # "carl"], excluding the reviewer from the task's own pool and naming him in the
-  # audit as an author of a diff he only read. See TaskEvent#block_transition?,
-  # which also explains why legacy rows (written before the marker) still count.
+  # up both its authors.
   def building_event_actors
-    return [] unless task.respond_to?(:task_events) && task.try(:persisted?)
-
-    task.task_events.where(to_stage: "building").where.not(actor: [nil, ""])
-        .order(:occurred_at, :id).reject(&:block_transition?)
-        .map { |e| e.actor.to_s.strip }.uniq
-  rescue StandardError
-    []
+    building_claim_events.map { |e| e.actor.to_s.strip }.uniq
   end
 
   # The domains this change needs reviewed: its shape's domains, plus any pulled in

@@ -109,7 +109,8 @@ Avi supervisor. Carl:
    had written every test on the diff — and this command duly seated Alex as the
    light on Alex's own PR (#1081). The exclusion now reads `devops.builders`, the
    server-owned set stamped on every build claim AND on the submit, unioned with
-   `built_by` and every `→ building` event actor.
+   `built_by` and every `→ building` event actor **that is a build claim** — a rework
+   bounce lands the task on `building` too, and that actor is you (see below).
 
    **The author is not always the claimer.** A session limit kills the claimer with
    nothing committed and another soul writes and ships the whole diff — the standard
@@ -127,7 +128,7 @@ Avi supervisor. Carl:
    | Refusal | What it means |
    |---------|---------------|
    | AN AUTHOR NAMED NOBODY | a `--builder` entry matches no roster soul — including a PARTIAL typo (`--builder steffon,alexx`), where the list still resolves to someone and the missed soul silently goes un-excluded |
-   | authors unknown | no *soul* is named — `built_by` blank, or holding a name that is not on the roster, and no soul on a `→ building` event |
+   | authors unknown | no *soul* is named — `built_by` blank, or holding a name that is not on the roster, and no soul on a `→ building` **build claim** (a rework bounce lands there too and is deliberately not read as authorship) |
    | author set INCOMPLETE | another session claimed **or shipped** the task and named no soul (`devops.builders_unattributed`) — never YOUR OWN bounce; see below |
    | an author would be SEATED | the pool was too small to drop them all, so one was kept eligible |
 

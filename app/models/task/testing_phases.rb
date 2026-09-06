@@ -111,7 +111,66 @@ class Task
     # The task-grain review gates whose first attempt marks actual review start.
     REVIEW_GATE_KEYS = %w[g2a_primary g2b_light].freeze
 
+    # The most INDIVIDUALLY-skipped tasks a full backfill may report and still be
+    # called a success. Zero would be stricter, and it is the wrong trade: this
+    # backfill runs as a release post-deploy hook, AFTER the code is already live,
+    # so an abort there leaves a half-shipped release for a human to unwind. One
+    # genuinely poisoned event history must not be able to wedge every future
+    # release. Past a handful, a skip is no longer poison — it is systematic (a DB
+    # blip mid-run, a column missing after a partial migration), and that DOES
+    # abort. Override for a known-bad row with BACKFILL_MAX_SKIPPED=<n>; nothing
+    # can override a total no-op (BackfillResult#no_op?).
+    BACKFILL_SKIP_ALLOWANCE = 5
+
+    # What a full backfill actually did, as three separate numbers.
+    #
+    # It used to be ONE number: a success count, incremented only on the happy path
+    # by a loop whose per-task `rescue` swallowed everything else. So a systematic
+    # failure drove that count DOWN toward zero — the exact same number an empty
+    # board reports — and the caller could not tell "nothing to do" from "nothing
+    # done". Keeping attempted alongside refreshed is what makes that distinction
+    # expressible at all; naming the skipped rows is what makes a tolerated skip
+    # visible in the deploy log instead of buried in a Rails logger warning nobody
+    # tails during a release.
+    BackfillResult = Struct.new(:attempted, :refreshed, :skipped_slugs) do
+      def skipped = skipped_slugs.size
+
+      # Did this run rewrite NOTHING it was asked to? The headline failure: every
+      # refresh raises, the old count printed 0, the rake exited 0, `heroku run
+      # --exit-code` reported success, and the release shipped past a backfill that
+      # touched no rows.
+      def no_op? = attempted.positive? && refreshed.zero?
+
+      # nil when the run is good enough to ship; otherwise the reason, for the abort.
+      def shortfall(allowance:)
+        return "refreshed #{refreshed} of #{attempted} task(s) — the backfill rewrote NOTHING" if no_op?
+        return nil if skipped <= allowance
+
+        "skipped #{skipped} of #{attempted} task(s), past the allowance of #{allowance} " \
+          "(#{named_skips}) — that is systematic, not one poisoned row"
+      end
+
+      def summary
+        base = "refreshed #{refreshed} of #{attempted} task(s)"
+        skipped.zero? ? base : "#{base}; skipped #{skipped} (#{named_skips})"
+      end
+
+      # Bounded so a whole-board failure cannot bury the abort reason under 1,600 slugs.
+      def named_skips
+        shown = skipped_slugs.first(10).join(", ")
+        skipped > 10 ? "#{shown}, +#{skipped - 10} more" : shown
+      end
+    end
+
     module_function
+
+    # The skip allowance in force, with an operator escape hatch. A garbled value
+    # falls back to the default rather than disarming the guard — a typo in a deploy
+    # env var must never be the thing that lets a no-op ship.
+    def backfill_skip_allowance(env: ENV)
+      raw = env["BACKFILL_MAX_SKIPPED"].to_s.strip
+      raw.match?(/\A\d+\z/) ? Integer(raw, 10) : BACKFILL_SKIP_ALLOWANCE
+    end
 
     def build(task, now: Time.current)
       task = Task.includes(:task_events).find_by!(slug: task.is_a?(Task) ? task.slug : task)
@@ -174,15 +233,29 @@ class Task
     end
 
     # Full backfill — recompute every task's projection from its durable events.
+    #
+    # Returns a BackfillResult, NOT a bare count. The per-task rescue stays (one
+    # unbuildable history must not strand the other 1,600 rows), but it now RECORDS
+    # the skip instead of only logging it, so the caller can compare what was done
+    # against what was attempted. `lib/tasks/task_testing_phases.rake` is that caller
+    # and it aborts on a shortfall; see BACKFILL_SKIP_ALLOWANCE for where the line sits.
+    #
+    # A failure of the QUERY itself (rather than of one row) still propagates — it is
+    # raised outside this rescue, and a backfill that cannot even enumerate its
+    # population has nothing honest to report.
     def backfill!(now: Time.current)
-      count = 0
+      attempted = 0
+      refreshed = 0
+      skipped = []
       Task.find_each do |task|
+        attempted += 1
         refresh!(task, now: now)
-        count += 1
+        refreshed += 1
       rescue StandardError => e
+        skipped << task.slug
         Rails.logger.warn("[task-testing-phases] backfill skipped #{task.slug}: #{e.class}: #{e.message}")
       end
-      count
+      BackfillResult.new(attempted, refreshed, skipped)
     end
 
     # ---- per-phase derivations (each returns a span row) ----------------------

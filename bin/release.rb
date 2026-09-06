@@ -1217,35 +1217,40 @@ def run_post_deploy(repos, target:)
     task = entry["task"]
     app  = entry["app"]
     cmd  = entry["cmd"]
+    # Members that declared the SAME work (in either the rails or the rake spelling)
+    # were folded into this one entry by Release::PostDeploy.dedupe — one dyno, but
+    # the [post-deploy] check is still stamped on EVERY one of them below, so a
+    # folded member never loses its record.
+    tasks = Array(entry["tasks"])
+    tasks = [task] if tasks.empty?
+    label = tasks.join(", ")
     # Unroutable declared command (a gem, or an app missing from qa_environments)
     # is a HARD abort, never a silent no-op. Intentionally BEFORE the DRY gate: a
     # dry-run must surface this misconfig (it would block the real run) rather than
     # preview past it.
-    abort!("task #{task} (#{entry['repo']}) declares a post_deploy_cmd but has no #{phase} app in " \
+    abort!("task #{label} (#{entry['repo']}) declares a post_deploy_cmd but has no #{phase} app in " \
            "config/qa_environments.yml — register one or clear devops.post_deploy_cmd") if app.empty?
 
     # One canonical argv drives BOTH the preview and the real run, so --dry-run
-    # prints exactly what executes. `--exit-code` makes `heroku run` passthrough the
-    # REMOTE command's exit status — without it heroku returns 0 the instant the
-    # dyno LAUNCHES (regardless of the command), so abort-on-failure never fires.
-    # `--` stops heroku flag parsing so a task-declared cmd can't be reparsed as
-    # `heroku run` flags; Shellwords.split keeps quoted/spaced args intact.
-    heroku_argv = ["heroku", "run", "-a", app, "--no-tty", "--exit-code", "--", *Shellwords.split(cmd)]
+    # prints exactly what executes. It is built by the unit-tested
+    # Release::PostDeploy.heroku_argv — `--exit-code` (the flag that makes a failing
+    # remote command turn this hook red) is asserted there rather than trusted here.
+    heroku_argv = Release::PostDeploy.heroku_argv(app: app, cmd: cmd)
     printed = heroku_argv.join(" ")
 
     if DRY
-      say("  [dry-run] post-deploy #{task}: #{printed}")
+      say("  [dry-run] post-deploy #{label}: #{printed}")
       next
     end
 
-    step("post-deploy #{task}: #{printed}")
+    step("post-deploy #{label}: #{printed}")
     post_deploy_scope = target == :qa ? "qa_post_deploy" : "prod_post_deploy"
-    out, ok = run_test_scope(post_deploy_scope, *heroku_argv, capture: true, repo: app, label: "#{task}: #{cmd}")
+    out, ok = run_test_scope(post_deploy_scope, *heroku_argv, capture: true, repo: app, label: "#{label}: #{cmd}")
     print(out)
-    record_post_deploy_check(task: task, app: app, cmd: cmd, ok: ok)
+    tasks.each { |slug| record_post_deploy_check(task: slug, app: app, cmd: cmd, ok: ok) }
     # In ship, add successful runs to the partial-ship "what's live" trail.
-    @ship_live << "post-deploy `#{cmd}` on #{app} (#{task})" if ok && defined?(@ship_live) && @ship_live
-    abort!("post-deploy command failed for #{task} on #{app}: `#{cmd}` — fix it, then re-run " \
+    @ship_live << "post-deploy `#{cmd}` on #{app} (#{label})" if ok && defined?(@ship_live) && @ship_live
+    abort!("post-deploy command failed for #{label} on #{app}: `#{cmd}` — fix it, then re-run " \
            "`bin/release #{subcmd}` (the command is idempotent; a re-run resumes)") unless ok
   end
 end

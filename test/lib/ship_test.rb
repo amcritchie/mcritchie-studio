@@ -604,7 +604,13 @@ class ShipTest < Minitest::Test
       _out, err, status, lines = run_ship(dir, extra_env: { "FAIL_FAST" => "1" })
 
       refute status.success?, "a red cert must fail the ship"
-      assert_includes err, "fast-check failed"
+      # bin/fast-check now has TWO non-zero verdicts — a RED lane, and a REFUSAL to
+      # certify a diff that would execute no test at all (capped-cert-reports-green) —
+      # so ship's message names the STEP and the verdict instead of asserting a red
+      # lane it cannot distinguish from here. The die line, not a bare mention: the
+      # "2/8 cert — running bin/fast-check" line would otherwise satisfy this even if
+      # ship had died downstream.
+      assert_includes err, "bin/fast-check did NOT certify"
       assert_includes err, "re-run bin/ship #{SLUG}", "the failure must name the resume"
       assert_equal ["TASK show", "FAST #{SLUG}"], markers(lines), "nothing may run past the red cert"
       _remote = `git -C #{dir} rev-parse origin/#{BRANCH} 2>/dev/null`.strip

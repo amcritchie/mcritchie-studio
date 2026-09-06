@@ -69,6 +69,17 @@ allowlist:
   local working tree for pre-PR builder runs. Only the **build** gate stays
   lenient on an empty diff (at design time no code exists yet, and it enforces no
   tiers anyway).
+- **And in the REVIEW role it must be proven against the PR.** A failed PR
+  file-list read — `unreadable` (the credential was refused) *or* `unverified`
+  (no `gh`, a 404, a transport error) — **refuses** the exemption there rather
+  than granting it off a local tree, however well rooted. Until 2026-09-05 only
+  the credential half was closed, and only in the diff resolver: `unverified`
+  fell through to the working tree, and the exempt path had no role-split at all,
+  so the alert landed as a *suggestion* and the review and builder verdicts came
+  back byte-identical — `✓ … → ready to advance`, off `[source: git working
+  tree]`. That is the 2026-08-08 false pass exactly
+  (`/tasks/exempt-path-trusts-local-tree`). The builder keeps the fallback,
+  named, for the reason below.
 - **The skip is loud** — it names what it observed and where it came from
   (`doc-only diff (kind: chore): 7 file(s), none behavioral — … [source: PR
   files]`), so a wrong skip is visible in the transcript instead of hiding behind
@@ -321,10 +332,15 @@ or `unverified`; plus `cause` and `reason`). `pr_read` is absent whenever the re
 fine, or there was no PR to read. What the gate then does is role-split, exactly like
 the CI verdict:
 
-| Role | On a credential-refused PR read |
-|------|----------------------------------|
-| `--gate-role review` | **Refuses.** `diff_source: "pr_unreadable"`, no files, and the error carries `CiStatus.unreadable_remedy`. This role's verdict is authoritative and it runs from a checkout that is *not* the task's tree, so a local stand-in here is the false pass with a fresh coat of paint. |
+| Role | On a FAILED PR read (`unreadable` or `unverified`) |
+|------|----------------------------------------------------|
+| `--gate-role review` | **Refuses**, on both the gated and the exempt path. A credential refusal is caught in the resolver (`diff_source: "pr_unreadable"`, no files, the error carrying `CiStatus.unreadable_remedy`); any other failed read is caught where the verdict is formed, because the local view still stands in there. This role's verdict is authoritative and it runs from a checkout that is *not* the task's tree, so a local stand-in here is the false pass with a fresh coat of paint. |
 | builder (submit-side) | **Degrades, loudly.** The local view is still graded — the builder stands in the task's own worktree and review re-reads them — but the verdict NAMES the refusal and carries the remedy as a suggestion. |
+
+The exempt path was the last holdout: it printed the alert as a suggestion for
+**both** roles, so a doc-only exemption could be earned while the PR went unread.
+Its refusal now also says *which* half refused — an unread PR is not the CI
+verdict, and a closing line that blames CI sends the reader to the wrong fix.
 
 The fix is one command: `eval "$(bin/gh-auth-refresh --export)"`, then re-run.
 

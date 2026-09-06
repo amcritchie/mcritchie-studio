@@ -393,7 +393,14 @@ if FastLane.cert_fresh?(devops["checks_run"], fingerprint)
 else
   say "2/8 cert — running bin/fast-check #{slug}"
   unless system(FAST_CHECK_BIN, slug, chdir: root)
-    die!("bin/fast-check failed — fix the red lane above, then re-run bin/ship #{slug} (it resumes here).")
+    # TWO DIFFERENT ERRANDS, and "fix the red lane" is the wrong one for half of them.
+    # bin/fast-check now REFUSES a diff it cannot certify — a capped mapped lane over an
+    # empty spine executes no test, so it exits 1 with nothing red. Sending that reader
+    # to hunt a failing lane is the same misdirection the cert itself keeps stamping out.
+    die!("bin/fast-check did NOT certify — read its output above. A RED lane means fix the " \
+         "failure. A REFUSAL means this diff cannot be fast-certified at all (it names the " \
+         "command that covers it — usually bin/full-suite-check #{slug}). Either way, re-run " \
+         "bin/ship #{slug} afterwards; it resumes here.")
   end
 end
 

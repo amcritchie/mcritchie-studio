@@ -45,7 +45,14 @@ class CertFailureExitContractTest < Minitest::Test
     assert_equal 1, code,
                  "ship stopped at 2/8 with a RED cert. Exiting 0 here tells every caller the task " \
                  "reached `submitted` when it is still [building] with nothing pushed."
-    assert_match(/fast-check failed/, out, "and it must say which step died")
+    # PINNED ON THE DIE LINE, not on the word "failed". bin/fast-check now has TWO
+    # non-zero verdicts — a RED lane, and a REFUSAL to certify a diff that would
+    # execute no test (capped-cert-reports-green) — so ship's message names the step
+    # and the verdict rather than asserting a red lane it cannot know about. Matching
+    # a bare /bin\/fast-check/ would be satisfied by the "2/8 cert — running
+    # bin/fast-check" line even if ship had actually died downstream, which is the
+    # exact confusion the sibling case below was written to catch.
+    assert_match(/bin\/fast-check did NOT certify/, out, "and it must say which step died")
   end
 
   # The OTHER shape of the same failure, and the one that reads as success most
@@ -60,7 +67,7 @@ class CertFailureExitContractTest < Minitest::Test
     # NAMES THE STEP, not merely nonzero. Without this the case passes against a
     # ship that ignored the cert entirely and died later at the push instead —
     # measured: that mutation survived here while the sibling case caught it.
-    assert_match(/fast-check failed/, out,
+    assert_match(/bin\/fast-check did NOT certify/, out,
                  "the cert step must be what stopped the run, not something downstream of it")
   end
 
