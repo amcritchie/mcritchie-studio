@@ -15,7 +15,7 @@ namespace :tasks do
     result = Task::TestingPhases.backfill!
     allowance = Task::TestingPhases.backfill_skip_allowance
 
-    puts "testing-phase projection #{result.summary}"
+    puts "testing-phase projection #{result.summary(allowance: allowance)}"
 
     shortfall = result.shortfall(allowance: allowance)
     next unless shortfall
@@ -24,6 +24,7 @@ namespace :tasks do
           "The projection was NOT fully rewritten, so any version-blind reader " \
           "(Review::DurationRoll reads the jsonb directly in SQL) is still serving the " \
           "stored values. Fix the cause and re-run — the backfill is idempotent. " \
-          "To ship past a known-bad row, raise the allowance: BACKFILL_MAX_SKIPPED=<n>."
+          "To ship past a known-bad row, raise the allowance: BACKFILL_MAX_SKIPPED=<n> — " \
+          "capped at half the board, because a majority skip is systematic whatever the env var says."
   end
 end

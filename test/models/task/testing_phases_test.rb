@@ -690,6 +690,55 @@ class Task::TestingPhasesTest < ActiveSupport::TestCase
                  "a garbled override falls back to the default rather than disarming the guard"
   end
 
+  # THE REGRESSION. BACKFILL_MAX_SKIPPED was unbounded, so an override turned the
+  # guard OFF rather than widening it: 19 of 20 tasks could fail, the rake exited 0,
+  # `heroku run --exit-code` reported success, and the release stamped its
+  # [post-deploy] check GREEN over a board that had almost entirely failed to rewrite.
+  test "[unit] no override can authorise skipping most of the board" do
+    mass_failure = Task::TestingPhases::BackfillResult.new(20, 1, (1..19).map { |i| "task-#{i}" })
+
+    refute mass_failure.no_op?, "the premise: one row DID refresh, so the no-op guard never fires"
+    refute_nil mass_failure.shortfall(allowance: 999_999),
+               "a 19-of-20 skip is systematic — no env var may ship it green"
+    assert_match(/skipped 19 of 20/, mass_failure.shortfall(allowance: 999_999))
+  end
+
+  test "[unit] the abort names the cap so the operator can account for the number" do
+    result = Task::TestingPhases::BackfillResult.new(20, 1, (1..19).map { |i| "task-#{i}" })
+    reason = result.shortfall(allowance: 999_999).to_s
+
+    assert_match(/past the allowance of 10/, reason, "the EFFECTIVE allowance, not the requested one")
+    assert_match(/BACKFILL_MAX_SKIPPED=999999 capped to 10/, reason,
+                 "an operator must never read a number they cannot trace to what they set")
+  end
+
+  test "[unit] the ceiling only lowers an override, never tightens the default" do
+    small = Task::TestingPhases::BackfillResult.new(6, 1, %w[a b c d e])
+
+    assert_equal Task::TestingPhases::BACKFILL_SKIP_ALLOWANCE, small.allowance_ceiling,
+                 "the ceiling floors at the default so a small board is unchanged"
+    assert_nil small.shortfall(allowance: Task::TestingPhases::BACKFILL_SKIP_ALLOWANCE),
+               "5 poisoned rows on a 6-row board tolerated exactly as before"
+    assert_equal 5, small.effective_allowance(999_999), "an override still cannot exceed the ceiling"
+  end
+
+  test "[unit] a raised allowance still works below the ceiling" do
+    board = Task::TestingPhases::BackfillResult.new(100, 92, (1..8).map { |i| "t#{i}" })
+
+    assert_equal 50, board.allowance_ceiling
+    assert_nil board.shortfall(allowance: 8), "the escape hatch survives — it is capped, not removed"
+  end
+
+  test "[unit] a skipped row prints as a warning, not an ordinary summary line" do
+    result = Task::TestingPhases::BackfillResult.new(20, 1, (1..19).map { |i| "task-#{i}" })
+
+    assert_match(/\A⚠ /, result.summary, "a tolerated mass skip must not scroll past looking routine")
+    assert_match(/SKIPPED 19 of 20/, result.summary, "the skip is stated against the board size")
+    assert_match(/tolerated under an allowance of 3/,
+                 Task::TestingPhases::BackfillResult.new(6, 3, %w[a b c]).summary(allowance: 3),
+                 "when skips ARE tolerated the line says what tolerated them")
+  end
+
   test "[unit] the summary names the skipped rows so a tolerated skip is visible" do
     result = Task::TestingPhases::BackfillResult.new(10, 8, %w[poisoned-a poisoned-b])
 
