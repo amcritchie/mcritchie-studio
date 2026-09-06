@@ -177,4 +177,4 @@ gem "studio-engine", "~> 0.65"
 #
 # Lift either one deliberately, in its own task, with the suite behind it.
 gem "redis", "~> 5.4"
-gem "resend", "~> 1.6"
+gem "resend", "~> 1.13"
