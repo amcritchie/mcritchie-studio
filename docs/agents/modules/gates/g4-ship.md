@@ -29,7 +29,9 @@ The gate window spans the whole irreversible half of the ship:
   or the repo's own `bin/deploy`, each with its `/up` hard-gate.
 - **Post-deploy hooks** — each member's `devops.post_deploy_cmd` against
   PRODUCTION; a non-zero exit aborts before the ship record. Duplicate
-  commands fold to one run.
+  commands fold to one run **only on the same app**, and only across the
+  interchangeable `rake`/`bin/rails` runner spellings — the rest of the command
+  is compared verbatim.
 - **The smoke seal** (`prod_smoke_seal` SOP) — the read-only `@qa-readonly`
   suite against prod. A SEAL, not a blocker: its verdict rides the gate
   (`metadata.seal: passed|failed`) but a red seal never flips the gate's
