@@ -823,10 +823,15 @@ class DorCheckExemptCiTest < Minitest::Test
   # THE CANDIDATE SET — GLOBBED, NEVER LISTED, and the reason is a mutation rather
   # than a tidiness preference. UNREADABLE_REMEDY_CALL_SITES is keyed by file path and
   # the count test iterates it, so for its whole life it opened exactly four files.
-  # Measured 2026-09-05, both arms at one head: a default-taking caller injected into
-  # bin/dor-check was KILLED (2 failures vs 3); the IDENTICAL caller injected into a
-  # NEW file, bin/lib/carl_probe.rb, SURVIVED — 26 runs, 260 assertions, 0 failures.
-  # A fifth file was simply never opened.
+  # RE-MEASURED IN REVIEW, at this branch's own base (32 tests) and head (33). The
+  # first draft of this paragraph quoted a 26-test head — numbers carried over from the
+  # older tree the finding was found on, which is precisely the drift this file exists
+  # to catch, written into itself. One probe, two placements: injected into
+  # bin/dor-check the COUNT test kills it ("Expected: 2" default-takers, found 3); the
+  # IDENTICAL caller in a NEW file, bin/lib/carl_probe.rb, SURVIVED the pre-change
+  # test at 32 runs, 310 assertions, 0 failures — and is KILLED by the set test below
+  # at 33 runs, 316 assertions, 1 failure naming the file. A fifth file was simply
+  # never opened.
   #
   # That is more than a test nit, because bin/lib/ci_status.rb's header tells the next
   # reader this registry "fails when [a caller] appears, vanishes, or changes route.
