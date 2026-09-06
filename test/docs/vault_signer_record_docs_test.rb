@@ -76,7 +76,7 @@ class VaultSignerRecordDocsTest < ActiveSupport::TestCase
      "denies that the file records it"],
     [/\b(?:is|are|was|were)\s+\*{0,2}not\*{0,2}\s+(?:a\s+)?(?:source|record|authority)\b/i,
      "denies the file is a source"],
-    [/\block(?:s)?\b|\black(?:s|ing)?\b|\bomits?\b|\bmisses\b|\bmissing\b|\babsent\b|\bsilent\s+on\b|\bnowhere\b/i,
+    [/\blacks?\b|\blacking\b|\bomits?\b|\bmisses\b|\bmissing\b|\babsent\b|\bsilent\s+on\b|\bnowhere\b/i,
      "asserts the record is missing"],
     [/\b(?:signer|signers|them|these|they)\b[^.]{0,40}\bonly\s+under\b/i,
      "denies by exclusion (only under one heading)"],
