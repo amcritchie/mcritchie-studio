@@ -58,6 +58,12 @@ module FullSuiteGate
   TEST_LANE = CertEvidence::TEST_LANE
   RUBOCOP_LANE = CertEvidence::RUBOCOP_LANE
   FAST_LANE = CertEvidence::FAST_LANE
+  # The DEFERRAL receipt lane — bin/fast-check's record that no local lane could
+  # certify this tree (a capped mapped lane over an empty spine), so the evidence
+  # is CI's. Graded here like any other lane; the pairing rule that makes it mean
+  # anything (a GREEN CI, never a provisional one) is dor-check's, exactly as the
+  # fast lane's pairing is.
+  DEFER_LANE = CertEvidence::DEFER_LANE
   BYPASS_TAG = "full-suite-bypass"
   # The FULL-cert lanes — what evaluate's `ok` means (full suite + full rubocop
   # both fresh). The fast lane is deliberately NOT part of `ok`: fast-cert
@@ -405,7 +411,9 @@ module FullSuiteGate
 
   # Map a DOR_CHECK_SUITE_EVIDENCE token to a verdict (test seam only). Tokens:
   # ok | missing | stale | tests_stale | rubocop_stale | unverifiable |
-  # fast_fresh | fast_stale (fast-cert evidence with NO full-cert evidence).
+  # fast_fresh | fast_stale (fast-cert evidence with NO full-cert evidence) |
+  # deferred_fresh | deferred_stale (a DEFERRAL receipt and no cert at all — the
+  # capped-diff shape, whose only evidence is the PR's CI).
   def injected_verdict(token)
     case token
     when "ok"            then verdict(ok: true)
@@ -415,6 +423,12 @@ module FullSuiteGate
     when "rubocop_stale" then verdict(ok: false, lanes: { TEST_LANE => :fresh, RUBOCOP_LANE => :stale, FAST_LANE => :missing })
     when "fast_fresh"    then verdict(ok: false, lanes: { TEST_LANE => :missing, RUBOCOP_LANE => :missing, FAST_LANE => :fresh })
     when "fast_stale"    then verdict(ok: false, lanes: { TEST_LANE => :missing, RUBOCOP_LANE => :missing, FAST_LANE => :stale })
+    when "deferred_fresh"
+      verdict(ok: false, lanes: { TEST_LANE => :missing, RUBOCOP_LANE => :missing,
+                                  FAST_LANE => :missing, DEFER_LANE => :fresh })
+    when "deferred_stale"
+      verdict(ok: false, lanes: { TEST_LANE => :missing, RUBOCOP_LANE => :missing,
+                                  FAST_LANE => :missing, DEFER_LANE => :stale })
     else verdict(ok: false) # "missing" and any unknown token → all lanes missing
     end
   end

@@ -387,67 +387,127 @@ class FastCertTest < Minitest::Test
                  FastCert.executed_test_paths(mapped, ["test/models/widget_test.rb"], decision)
   end
 
-  # --- the refusal itself --------------------------------------------------------
+  # --- the tri-state verdict -----------------------------------------------------
+  #
+  # WHERE THE REFUSAL LANDS IS THE BUG THIS SPLIT FIXES. bin/fast-check runs at ship
+  # step 2 of 8, before the push and before any PR exists — so refusing a CAPPED diff
+  # left the builder with no PR, no CI, and one remedy: a local full suite measured at
+  # ~30 minutes against CI's ~9 for the identical command. The refusal was right; its
+  # POSITION was not. A capped diff now DEFERS (records a receipt, exits 2, and
+  # bin/dor-check demands a GREEN CI); a diff mapping to NOTHING still REFUSES.
 
-  def test_a_capped_lane_over_an_empty_spine_is_refused_and_names_the_culprit
+  def test_a_capped_lane_over_an_empty_spine_DEFERS_and_names_the_culprit
     mapped = (1..26).map { |i| "test/lib/t#{i}_test.rb" }
     capped = FastCert.cap_decision(mapped, { "app/services/solana/config.rb" => mapped })
 
-    refusal = FastCert.zero_test_refusal(mapped, [], capped, slug: "some-task")
+    outcome = FastCert.zero_test_outcome(mapped, [], capped, slug: "some-task")
 
-    refute_nil refusal, "the PR #549 shape must NOT certify"
-    assert_match(/REFUSING TO CERTIFY/, refusal)
-    assert_match(/ZERO test files/, refusal)
-    assert_match(/CAPPED — 26 mapped path\(s\) over the cap of 15/, refusal,
+    refute_nil outcome, "the PR #549 shape must NOT certify"
+    assert_equal :defer, outcome[:kind],
+                 "a capped diff mapped to MORE tests than the cap, and CI runs every one of them"
+    assert_match(/NOT CERTIFIED/, outcome[:message], "it is still not a certification")
+    assert_match(/ZERO test files/, outcome[:message])
+    assert_match(/CAPPED — 26 mapped path\(s\) over the cap of 15/, outcome[:message],
                  "the builder is told what tripped it")
-    assert_match(%r{widest: app/services/solana/config\.rb}, refusal, "and which file caused it")
-    assert_match(%r{bin/full-suite-check some-task}, refusal,
-                 "the remedy is NAMED, for THIS task — that is what makes the builder able to act")
-    assert_match(/FAST_CHECK_MAPPED_CAP=26/, refusal, "the deliberate override stays discoverable")
+    assert_match(%r{widest: app/services/solana/config\.rb}, outcome[:message], "and which file caused it")
+    assert_match(/FAST_CHECK_MAPPED_CAP=26/, outcome[:message], "the deliberate override stays discoverable")
+    assert_match(%r{bin/full-suite-check some-task}, outcome[:message],
+                 "and certifying locally is still offered, for THIS task")
   end
 
-  # THE OTHER DOOR INTO THE SAME ROOM. Keyed on the CAP, a satellite diff mapping to
-  # 26 test files would be refused while one mapping to NONE — strictly LESS evidence
-  # — would still certify green on rubocop alone. The guard is keyed on the zero.
-  def test_a_diff_that_maps_to_nothing_over_an_empty_spine_is_refused_too
-    refusal = FastCert.zero_test_refusal([], [], FastCert.cap_decision([], {}), slug: "some-task")
+  # THE RECEIPT IS THE DEFERRAL. A message the builder reads is not evidence — what
+  # dor-check grades is `detail`, so it must carry the WHOLE cause on its own: no
+  # local lane could run, why, and the rule that will be applied to it.
+  def test_the_deferral_detail_is_a_standalone_record_of_the_cause
+    mapped = (1..26).map { |i| "test/lib/t#{i}_test.rb" }
+    capped = FastCert.cap_decision(mapped, { "app/services/solana/config.rb" => mapped })
 
-    refute_nil refusal, "zero executed tests is zero evidence however it was reached"
-    assert_match(/maps to NO test file/, refusal, "the reason given must be the REAL one, not the cap")
-    refute_match(/CAPPED/, refusal, "no cap was involved — saying so would misdirect the builder")
-    refute_match(/FAST_CHECK_MAPPED_CAP/, refusal,
+    detail = FastCert.zero_test_outcome(mapped, [], capped, slug: "some-task")[:detail]
+
+    assert_match(/DEFERRED to GitHub CI/, detail)
+    assert_match(/CAPPED — 26 mapped path\(s\) over the cap of 15/, detail)
+    assert_match(/GREEN CI/, detail, "the rule that will be applied rides on the record itself")
+    assert_match(/never provisionally/, detail,
+                 "the asymmetry with the fast lane is part of the record, not folklore")
+  end
+
+  # DEFERRING IS NOT SKIPPING, said in the message the builder actually reads. A
+  # builder who is told "continuing" and not told what still has to be true will read
+  # the later dor-check refusal as a new fault rather than as the gate working.
+  def test_the_deferral_message_states_the_fence_it_is_deferring_to
+    mapped = (1..26).map { |i| "test/lib/t#{i}_test.rb" }
+    capped = FastCert.cap_decision(mapped, { "app/services/solana/config.rb" => mapped })
+
+    message = FastCert.zero_test_outcome(mapped, [], capped, slug: "some-task")[:message]
+
+    assert_match(/REFUSES the submit unless CI is GREEN/, message)
+    assert_match(/deferring is not skipping/i, message)
+  end
+
+  # THE OTHER DOOR INTO THE SAME ROOM, AND IT DOES NOT MOVE. Keyed on the CAP, a
+  # satellite diff mapping to 26 test files would be refused while one mapping to NONE
+  # — strictly LESS evidence — would certify green on rubocop alone. The guard stays
+  # keyed on the zero, and this half stays a REFUSAL: "nothing in the suite reads this
+  # code" is a fact about the DIFF, not about our local budget, and deferring it would
+  # delete the guard for one of its two doors rather than relocate its evidence.
+  def test_a_diff_that_maps_to_nothing_over_an_empty_spine_is_still_REFUSED
+    outcome = FastCert.zero_test_outcome([], [], FastCert.cap_decision([], {}), slug: "some-task")
+
+    refute_nil outcome, "zero executed tests is zero evidence however it was reached"
+    assert_equal :refuse, outcome[:kind], "this door is not a deferral — it is the refusal, unchanged"
+    assert_match(/REFUSING TO CERTIFY/, outcome[:message])
+    assert_match(/maps to NO test file/, outcome[:message], "the reason given must be the REAL one, not the cap")
+    refute_match(/CAPPED/, outcome[:message], "no cap was involved — saying so would misdirect the builder")
+    refute_match(/FAST_CHECK_MAPPED_CAP/, outcome[:message],
                  "raising a cap that never tripped fixes nothing; offering it is a dead end")
-    assert_match(%r{bin/full-suite-check some-task}, refusal)
+    refute_match(/DEFER/i, outcome[:message], "and it must not advertise a route it is not taking")
+    assert_match(%r{bin/full-suite-check some-task}, outcome[:message])
   end
 
   # WITHOUT A SLUG (bin/fast-check --print, or a hook) the remedy still has to be
   # copyable, so it degrades to the placeholder rather than to "bin/full-suite-check ".
-  def test_the_refusal_without_a_slug_still_prints_a_usable_command
-    refusal = FastCert.zero_test_refusal([], [], FastCert.cap_decision([], {}))
+  def test_both_verdicts_without_a_slug_still_print_a_usable_command
+    refusal = FastCert.zero_test_outcome([], [], FastCert.cap_decision([], {}))
+    mapped = (1..26).map { |i| "test/lib/t#{i}_test.rb" }
+    capped = FastCert.cap_decision(mapped, { "app/services/solana/config.rb" => mapped })
+    deferral = FastCert.zero_test_outcome(mapped, [], capped)
 
-    assert_match(%r{bin/full-suite-check <task>}, refusal)
+    assert_match(%r{bin/full-suite-check <task>}, refusal[:message])
+    assert_match(%r{bin/full-suite-check <task>}, deferral[:message])
+  end
+
+  # THE SIGNAL IS NON-ZERO, and that is the whole safety property. Every caller
+  # reaches bin/fast-check through `system(...)`, whose truthiness is "exited 0" — so
+  # a caller that has never heard of deferral keeps reading it as "not certified".
+  # Exiting 0 would have been one line and would have recreated PR #1226's fail-green.
+  def test_the_deferred_exit_status_is_not_success
+    refute_equal 0, FastCert::DEFERRED_EXIT,
+                 "a deferral must be FALSY to every system() caller — it is not a certification"
+    assert_equal 2, FastCert::DEFERRED_EXIT, "and it must be distinguishable from a plain refusal (1)"
   end
 
   # AND THE HALF THAT MUST NOT MOVE. A capped run whose SPINE still ran executed real
   # tests: it is a NARROWER cert, honestly labelled by the existing "0 mapped
-  # (CAPPED: ...)" evidence, and refusing it would degrade builds that legitimately
-  # certified. This is the any-cap-degrades ruling, rejected, pinned as a test.
+  # (CAPPED: ...)" evidence, and degrading it would hurt builds that legitimately
+  # certified. This is the any-cap-degrades ruling, rejected, pinned as a test — and
+  # it must not become a DEFERRAL either, which would be the same degradation wearing
+  # a new name.
   def test_a_capped_lane_with_a_LIVE_spine_still_certifies
     mapped = (1..26).map { |i| "test/lib/t#{i}_test.rb" }
     capped = FastCert.cap_decision(mapped, { "app/services/solana/config.rb" => mapped })
 
-    assert_nil FastCert.zero_test_refusal(mapped, ["test/models/task_test.rb"], capped),
-               "the spine ran real tests — a cap alone must not degrade the verdict"
+    assert_nil FastCert.zero_test_outcome(mapped, ["test/models/task_test.rb"], capped),
+               "the spine ran real tests — a cap alone must neither refuse NOR defer"
   end
 
-  def test_an_ordinary_diff_is_never_refused
+  def test_an_ordinary_diff_is_never_refused_or_deferred
     mapped = ["test/models/widget_test.rb"]
     decision = FastCert.cap_decision(mapped, { "app/models/widget.rb" => mapped })
 
-    assert_nil FastCert.zero_test_refusal(mapped, ["test/models/task_test.rb"], decision)
-    assert_nil FastCert.zero_test_refusal(mapped, [], decision),
+    assert_nil FastCert.zero_test_outcome(mapped, ["test/models/task_test.rb"], decision)
+    assert_nil FastCert.zero_test_outcome(mapped, [], decision),
                "a mapped lane that runs is evidence, spine or no spine"
-    assert_nil FastCert.zero_test_refusal([], ["test/models/task_test.rb"], decision),
+    assert_nil FastCert.zero_test_outcome([], ["test/models/task_test.rb"], decision),
                "a spine that runs is evidence, mapping or no mapping"
   end
 

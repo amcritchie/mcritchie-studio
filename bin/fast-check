@@ -106,9 +106,12 @@
 #   FAST_CHECK_GATE_BIN            gate CLI (default: bin/gate; tests stub it)
 #
 # Exit code: 0 = all lanes green (evidence recorded/printed), 1 = a lane failed,
-# no fingerprint, the evidence couldn't be recorded, or the run would have
-# executed ZERO test files (the zero-evidence guard below — a capped mapped
-# lane over an empty spine certifies nothing, so it does not certify).
+# no fingerprint, the evidence couldn't be recorded, or the diff maps to NO test
+# file at all (the zero-evidence guard below), 2 = DEFERRED to GitHub CI — the
+# mapped lane was CAPPED over an empty spine, so no local lane could certify this
+# tree and a fingerprint-bound receipt was recorded instead. 2 is NOT a
+# certification: it is falsy to every `system(...)` caller, and only bin/ship
+# reads it as "carry on to the PR" (bin/dor-check then requires a GREEN CI).
 
 require "optparse"
 require "json"
@@ -277,10 +280,16 @@ skip_test_prepare = ENV.fetch("FAST_CHECK_SKIP_TEST_PREPARE", "") == "1" || gem_
 # A CERT THAT EXECUTES NO TESTS MUST NOT REPORT GREEN. The cap can skip the mapped
 # lane and the spine can resolve to nothing in the same run — on turf-monster PR
 # #549 it did, and this script printed "fast cert green" over a run whose only
-# executed lane was rubocop. Refuse instead, name why, and name the command that
-# DOES cover the diff, so the BUILDER learns before handoff rather than the
-# REVIEWER learning after. Rationale, and why the guard is keyed on zero executed
-# tests rather than on the cap, in FastCert.zero_test_refusal.
+# executed lane was rubocop. That still never certifies.
+#
+# WHAT CHANGED IS WHERE THE EVIDENCE COMES FROM, not whether it is demanded. The
+# guard now has two verdicts (FastCert.zero_test_outcome): a diff that maps to NO
+# test REFUSES exactly as before, while a CAPPED diff — which mapped to MORE tests
+# than the cap, every one of which runs on CI — DEFERS: it records a
+# fingerprint-bound "[cert-deferred@<fp>]" receipt and exits 2, so ship can push
+# and open the PR and bin/dor-check can demand the GREEN CI at step 7. The refusal
+# moved from step 2 of 8 (no PR, no CI, ~30 minutes of local suite as the only
+# remedy) to step 7 (the PR open, CI settled, the verdict on real evidence).
 #
 # DECIDED HERE, BEFORE ANY LANE, because it is a precondition on the SELECTION —
 # the same shape as the root, desk, and dirty-tree guards above, which all abort
@@ -293,8 +302,66 @@ skip_test_prepare = ENV.fetch("FAST_CHECK_SKIP_TEST_PREPARE", "") == "1" || gem_
 # lane, so a gem never has an empty mapped lane to refuse — reading `mapped_only`
 # for one would refuse the repo that runs the MOST.
 unless gem_repo
-  nothing_to_certify = FastCert.zero_test_refusal(mapped_only, spine, cap, slug: slug)
-  abort "fast-check: #{nothing_to_certify}" if nothing_to_certify
+  zero = FastCert.zero_test_outcome(mapped_only, spine, cap, slug: slug)
+  abort "fast-check: #{zero[:message]}" if zero && zero[:kind] == :refuse
+
+  if zero && zero[:kind] == :defer
+    # THE DEFERRAL, and the reason it is decided HERE rather than in bin/ship: this is the
+    # only place that knows WHY no lane will run, and the receipt has to be bound to the
+    # tree that fact is true of. Ship owns the POLICY (carry on to the PR); this owns the
+    # DETECTION and the RECORD. See FastCert.zero_test_outcome for the case split.
+    warn "fast-check: #{zero[:message]}"
+
+    defer_fp = FullSuiteGate.fingerprint(root)
+    if defer_fp.nil?
+      # No fingerprint, no receipt — and a receipt is the ONLY thing that makes a deferral
+      # different from a shrug. Refuse rather than defer into nothing.
+      abort "fast-check: could not fingerprint the code at #{root} (no git repo / identity?), so the " \
+            "deferral cannot be recorded and dor-check would refuse it. Certify locally instead: " \
+            "bin/full-suite-check #{slug || '<task>'}"
+    end
+
+    defer_line = FullSuiteGate.evidence_line(FullSuiteGate::DEFER_LANE, defer_fp, zero[:detail],
+                                             repo: cert_repo)
+    puts defer_line
+
+    if options[:print] || slug.nil?
+      warn "fast-check: DEFERRED at #{defer_fp[0, 12]}." \
+           "#{slug.nil? ? ' (no task slug — receipt printed, not recorded)' : ' (--print: not recorded)'}"
+      exit FastCert::DEFERRED_EXIT
+    end
+
+    # RECORD IT OR REFUSE. An unrecorded deferral is strictly worse than a refusal: ship
+    # would push, open the PR, wait out the CI, and dor-check would then refuse for want of
+    # the receipt — the same 30 minutes back, spent later and less legibly. Same
+    # baseline-then-read-back discipline the green path uses, for the same reason: a write
+    # this gate cannot VERIFY is a write it must not rely on.
+    defer_existing = CertEmission.fetch_checks(TASK_BIN, slug)
+    if defer_existing.nil?
+      abort "fast-check: DEFERRED, but #{slug.inspect}'s checks_run could not be read (bin/task show), so " \
+            "the receipt cannot be written or verified. Re-run bin/fast-check #{slug}."
+    end
+    unless system(TASK_BIN, "update", slug, "--checks", defer_line)
+      abort "fast-check: DEFERRED, but FAILED to record the receipt on #{slug.inspect} (bin/task update). " \
+            "Re-run bin/fast-check #{slug}."
+    end
+    defer_kept = defer_existing.reject { |prior| prior.match?(FullSuiteGate.evidence_re([FullSuiteGate::DEFER_LANE])) }
+    defer_missing = CertEmission.missing_after_write(TASK_BIN, slug, [defer_line] + defer_kept)
+    if defer_missing.nil?
+      # The write returned 200; only the confirming READ failed. Say so — the deferral IS
+      # recorded as far as anything here can tell, and dor-check reads the board itself.
+      warn "fast-check: DEFERRED at #{defer_fp[0, 12]} — receipt written to #{slug}, but the read-back " \
+           "FAILED (UNVERIFIED). Check with bin/task show #{slug} -v; if it is absent, re-run bin/fast-check #{slug}."
+    elsif defer_missing.any?
+      abort "fast-check: DEFERRED, but the read-back is MISSING #{defer_missing.size} checks line(s) — the " \
+            "receipt did not land, and dor-check will refuse without it:\n  #{defer_missing.join("\n  ")}\n" \
+            "Re-run bin/fast-check #{slug}."
+    else
+      warn "fast-check: DEFERRED at #{defer_fp[0, 12]} — receipt recorded on #{slug} (read-back confirms). " \
+           "GitHub CI is now the ONLY evidence for this diff, and dor-check requires it GREEN."
+    end
+    exit FastCert::DEFERRED_EXIT
+  end
 end
 
 # --- the lane ceiling -----------------------------------------------------------

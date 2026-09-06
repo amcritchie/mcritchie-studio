@@ -202,11 +202,41 @@ impossible by construction rather than by every repo remembering to ignore `tmp/
 
    **A CERT THAT EXECUTES ZERO TEST FILES DOES NOT CERTIFY.** Before any lane
    runs, `bin/fast-check` counts the test paths this run will actually execute —
-   the mapped lane (EMPTY when the cap skipped it) plus the spine — and REFUSES
-   with exit 1 when that set is empty, naming what tripped it, the widest-mapping
-   file when a cap did, and `bin/full-suite-check <task>` as the remedy. Nothing
-   is recorded and no `g1_cert` attempt is stamped; it is a precondition on the
-   SELECTION, the same shape as the root, desk, and dirty-tree guards.
+   the mapped lane (EMPTY when the cap skipped it) plus the spine — and refuses
+   to report green when that set is empty. **It has two verdicts, and which one
+   you get depends on WHY nothing would run:**
+
+   | the set is empty because… | verdict | exit | what happens |
+   |---|---|---|---|
+   | the diff maps to **NO test file** (no convention target, no grep hit) | **REFUSE** | `1` | nothing recorded, nothing pushed; remedy is `bin/full-suite-check <task>` |
+   | the mapped lane was **CAPPED** (more mapped tests than the cap) | **DEFER** | `2` | a `[cert-deferred@<fp>]` receipt is recorded; `bin/ship` pushes and opens the PR; **`bin/dor-check` then requires a GREEN CI** |
+
+   **Deferring is not skipping — the refusal MOVES, from ship step 2 to step 7.**
+   A capped diff mapped to MORE relevant tests than the cap, not fewer, and CI
+   runs every one of them on this exact tree in the run the PR triggers anyway;
+   only the RUNNER was wrong, and we chose that ourselves for a budget reason. So
+   the cert authority moves to CI, and `bin/dor-check` credits the receipt **only
+   alongside a GREEN CI — never provisionally**, unlike the fast lane (a fast cert
+   has a real local run underneath it; a deferral has nothing). A red CI, an
+   ABSENT CI (`:none`), a CI nobody could read, and a receipt gone STALE under a
+   later edit all still refuse the submit. Exit `2` is deliberately non-zero so
+   every `system(...)` caller that has not been taught about deferral keeps
+   reading it as "not certified".
+
+   Why it moved at all: `bin/fast-check` runs at **ship step 2 of 8 — before the
+   push, before the PR, before any CI exists**, so a refusal left the builder with
+   no PR and one remedy — a local full suite MEASURED at ~30 minutes against CI's
+   ~9 for the identical command. A build paid that in full on 2026-09-06, and any
+   diff wide enough to trip the cap pays it (`app/services/solana/config.rb` trips
+   it at 26-29 paths routinely).
+
+   On the REFUSE path nothing is recorded and no `g1_cert` attempt is stamped; it
+   is a precondition on the SELECTION, the same shape as the root, desk, and
+   dirty-tree guards. On the DEFER path the receipt is the ONLY thing written —
+   still no `g1_cert` attempt, because no lane ran and an attempt would report a
+   testing window that measured nothing. A deferral that cannot be RECORDED
+   refuses (exit 1) instead: an unrecorded deferral would push, wait out CI, and
+   be refused at step 7 for want of the receipt.
 
    It exists because turf-monster PR #549 recorded this, verbatim:
    `fast cert green: 0 mapped (CAPPED: 26 > 15; spine only) + 0 spine test
@@ -218,8 +248,10 @@ impossible by construction rather than by every repo remembering to ignore `tmp/
    weight CI over the G1 cert.
 
    **Keyed on the zero, not on the cap** — deliberately. Keyed on the cap, a
-   satellite diff mapping to 26 test files would be refused while one mapping to
-   NONE, strictly less evidence, would still certify green on rubocop alone.
+   satellite diff mapping to 26 test files would be treated worse than one mapping
+   to NONE, strictly less evidence, which would still certify green on rubocop
+   alone. The cap decides only WHICH of the two verdicts you get, never whether a
+   run with no tests may report green.
    **A capped run whose spine still ran is NOT refused**: it executed real tests
    and its evidence already reads `0 mapped (CAPPED: …)` beside the loud
    `MAPPED LANE CAPPED` narration — a narrower cert, honestly labelled, which is

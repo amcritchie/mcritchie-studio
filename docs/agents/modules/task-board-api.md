@@ -707,7 +707,8 @@ See footgun 4 for the full set of fields that live outside `devops`.
    is why `--checks` REPLACES your tier tags).
    **One exception, by design: cert evidence in `checks_run` is machine-owned.**
    The fingerprint-bound lines the cert tools stamp (`[full-suite@<fp>]`,
-   `[rubocop@<fp>]`, `[fast-cert@<fp>]` — what `bin/dor-check` grades) survive a
+   `[rubocop@<fp>]`, `[fast-cert@<fp>]`, `[cert-deferred@<fp>]` — what
+   `bin/dor-check` grades) survive a
    `checks_run` you send without them: the board carries forward every evidence
    lane your payload does not itself supply (`Task#preserve_cert_evidence`,
    `lib/cert_evidence.rb`). Your own tier tags are still replaced wholesale, so
