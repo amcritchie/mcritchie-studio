@@ -600,8 +600,10 @@ and release durations from `ReleaseEvent`s. Cached metrics live on
 `releases.duration_metrics` with `duration_metrics_cached_at` and
 `duration_cache_version`. Task/release event writes refresh the owning release
 best-effort, `bin/rails releases:refresh_duration_metrics` refreshes the last
-three shipped releases, and `/deployments/all` plus `/deployments/:slug` render
-from the cache with an in-memory fallback when a row is missing.
+three shipped releases (aborting non-zero if it refreshes fewer than it selected,
+so the post-deploy hook cannot record green over a stale cache), and
+`/deployments/all` plus `/deployments/:slug` render from the cache with an
+in-memory fallback when a row is missing.
 
 ## The `devops` object
 

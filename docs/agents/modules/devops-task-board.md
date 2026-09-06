@@ -434,8 +434,15 @@ Supported fields:
 `heroku run --exit-code` and reads nothing else — not its output. A command that
 prints its own failure and exits 0 records the hook **GREEN** and the release
 ships past it. So a command that can partially fail must compare what it did
-against what it should have done and exit non-zero on the shortfall;
-`tasks:backfill_testing_phases` is the worked example.
+against what it should have done and exit non-zero on the shortfall.
+`tasks:backfill_testing_phases` and `releases:refresh_duration_metrics` are the
+worked examples — and they pick DIFFERENT skip allowances on purpose. The
+backfill walks every task, so it tolerates a few isolated poisoned rows
+(`BACKFILL_MAX_SKIPPED`); the refresh walks a set bounded by `LIMIT`, where a
+flat allowance would swallow the whole population, so it tolerates none by
+default (`REFRESH_MAX_SKIPPED`). Size the allowance to the POPULATION, and
+measure against what the command actually selected rather than against its
+ceiling.
 
 **`post_deploy_cmd` safety rule.** Because `bin/release` runs the command
 verbatim against PRODUCTION, `bin/dor-check` **rejects** a bare full-suite seed

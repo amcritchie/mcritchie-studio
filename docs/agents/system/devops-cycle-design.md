@@ -393,7 +393,13 @@ averages, `/deployments/all` lists release timestamp rows, and
 `/deployments/:slug` shows the per-release read view. Task/release event writes
 refresh the owning release best-effort, and production follow-up tasks should use
 the idempotent post-deploy hook `bin/rails releases:refresh_duration_metrics` to
-backfill the last three shipped releases after a deploy.
+backfill the last three shipped releases after a deploy. That hook **exits
+non-zero when it falls short** — it compares refreshed against the releases it
+actually selected and aborts on a shortfall — so it is safe to copy as the shape
+a `post_deploy_cmd` should take (see the exit-status rule in
+`docs/agents/modules/devops-task-board.md`). The denominator is the SELECTED set,
+never `LIMIT`: `LIMIT` is a ceiling, and a board holding fewer shipped releases
+than the ceiling is a complete run, not a shortfall.
 
 **Gem members & producer-first ordering.** A release is not apps-only — it can
 carry **gem** tasks (`studio-engine`, `solana-studio`) as first-class members

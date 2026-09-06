@@ -88,9 +88,17 @@ class Release
     # folded member's slug rides along in "tasks" so the CLI still records the
     # [post-deploy] check on each of them.
     #
-    # A blank app is deliberately NOT folded: it is a hard abort, and each
-    # misdeclaration has to reach the operator by name — otherwise they fix one,
-    # re-run the release, and hit the next one twelve minutes later.
+    # A blank app is deliberately NOT folded. "" is the ABSENCE of a target, not an
+    # app identity, so folding on it would merge across REPOS: two unroutable
+    # declarations in different repos key alike and collapse into the first one's
+    # entry. bin/release's abort names a single entry["repo"], so the operator would
+    # be sent to studio-engine for a command solana-studio declared. Not folding keeps
+    # every misdeclaration attributed to the repo that made it.
+    #
+    # It does NOT save the operator a second round trip, and this comment used to
+    # claim it did. `abort!` is Kernel#abort, so the release stops at the FIRST blank
+    # app whether or not the rest are folded, and the next one surfaces on the next
+    # run either way.
     def dedupe(entries)
       entries.each_with_object([]) do |entry, kept|
         prior = entry["app"].empty? ? nil : kept.find { |e| same_work?(e, entry) }
@@ -106,16 +114,30 @@ class Release
     # like the "none" sentinel above, because the RUNNER is a synonym, not an argument.
     RUNNER_PREFIX = %r{\A(?:bundle\s+exec\s+)?(?:\./)?(?:bin/)?(?:rails|rake)\s+}i
 
-    # The dedupe compares WORK, not strings: collapse whitespace, then drop the
-    # interchangeable runner prefix.
+    # The dedupe compares WORK, not strings: drop the interchangeable runner prefix,
+    # and nothing else.
     #
-    # Everything AFTER the runner is compared CASE-SENSITIVELY on purpose. A
-    # command's arguments can be case-significant, and the two ways to be wrong here
-    # are not symmetric: a false SPLIT runs an idempotent command twice (merely
-    # slow), while a false MERGE silently skips declared work — which is the exact
-    # failure class this task exists to close. So the bias is toward splitting.
+    # Everything AFTER the runner is compared VERBATIM — case AND whitespace — on
+    # purpose. The two ways to be wrong here are not symmetric: a false SPLIT runs an
+    # idempotent command twice (merely slow), while a false MERGE silently skips
+    # declared work and still stamps that member's [post-deploy] check green. So the
+    # bias is toward splitting.
+    #
+    # This used to collapse runs of whitespace before comparing, and the collapse
+    # reached INSIDE quoted arguments: `runner 'B.run("a  b")'` and `runner 'B.run("a b")'`
+    # keyed alike, so the second was folded away UNRUN and still stamped green — the
+    # exact failure class named above, committed by the guard against it. Nothing
+    # needed the collapse: RUNNER_PREFIX carries its own `\s+` and already absorbs any
+    # spacing in the runner itself, so `  bundle  exec   rake   x` still folds onto
+    # `rake x`. Deleting it splits only commands whose ARGUMENTS differ, which is the
+    # cheap way to be wrong.
+    #
+    # `Shellwords.split(cmd).join(" ")` normalises argv properly but RAISES on an
+    # unbalanced quote, and `plan` builds the whole release's command list — including
+    # for `--dry-run`. One malformed declaration would blow up the very preview that
+    # exists to surface it. Comparing verbatim cannot raise.
     def work_key(cmd)
-      cmd.to_s.strip.gsub(/\s+/, " ").sub(RUNNER_PREFIX, "")
+      cmd.to_s.strip.sub(RUNNER_PREFIX, "")
     end
 
     # The canonical argv for running one planned entry, in ONE place so --dry-run

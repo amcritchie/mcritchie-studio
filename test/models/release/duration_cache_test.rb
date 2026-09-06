@@ -187,4 +187,112 @@ class Release::DurationCacheTest < ActiveSupport::TestCase
     assert_equal "intent", row["source"], "an intent, where one exists, still wins"
     assert_equal "builder", row["actor"]
   end
+
+  # --- refresh_recent! reports a VERDICT, not just its winners -----------------
+  #
+  # Unit tier for the post-deploy hook's guard. `lib/tasks/releases.rake` turns the
+  # RefreshResult below into a process exit status, and that exit status is the only
+  # thing `bin/release` reads to decide whether the hook passed.
+
+  def shipped_release(slug, shipped_at:)
+    release = Release.create!(slug: slug, branch: "release", state: "shipped")
+    release.update_columns( # rubocop:disable Rails/SkipsModelValidations
+      shipped_at: shipped_at, created_at: shipped_at,
+      duration_metrics: {}, duration_metrics_cached_at: nil, duration_cache_version: 0
+    )
+    release
+  end
+
+  test "attempted counts the SELECTED releases, not the limit" do
+    Release.delete_all
+    shipped_release("rr-only-one", shipped_at: 2.days.ago)
+
+    result = Release::DurationCache.refresh_recent!(limit: 5)
+
+    assert_equal 1, result.attempted, "the limit is a ceiling on the selection, not a demand — " \
+                                      "measuring against 5 would call a one-release board short"
+    assert_equal 1, result.refreshed
+    assert_nil result.shortfall(allowance: Release::DurationCache::REFRESH_SKIP_ALLOWANCE)
+  end
+
+  test "attempted is capped by the limit when the board holds more" do
+    Release.delete_all
+    3.times { |i| shipped_release("rr-many-#{i}", shipped_at: (10 - i).days.ago) }
+
+    result = Release::DurationCache.refresh_recent!(limit: 2)
+
+    assert_equal 2, result.attempted, "the ceiling still applies when the board exceeds it"
+  end
+
+  test "a raising release is recorded as a skip instead of escaping the run" do
+    Release.delete_all
+    newest = shipped_release("rr-poisoned", shipped_at: 1.day.ago)
+    older = shipped_release("rr-healthy", shipped_at: 5.days.ago)
+
+    original = Release::DurationCache.method(:refresh!)
+    stub = lambda do |release, **kwargs|
+      raise "poisoned" if release.slug == newest.slug
+
+      original.call(release, **kwargs)
+    end
+    result = Release::DurationCache.stub(:refresh!, stub) { Release::DurationCache.refresh_recent!(limit: 3) }
+
+    assert_equal 2, result.attempted
+    assert_equal 1, result.refreshed
+    assert_equal [newest.slug], result.skipped_slugs
+    assert_equal Release::DurationCache::VERSION, older.reload.duration_cache_version,
+                 "the healthy release BEHIND the poisoned one still got written"
+  end
+
+  test "a query failure still propagates rather than reporting a tidy shortfall" do
+    Release.delete_all
+    shipped_release("rr-query-blows-up", shipped_at: 1.day.ago)
+
+    Release::DurationCache.stub(:recent_releases, ->(**) { raise ActiveRecord::StatementInvalid, "boom" }) do
+      assert_raises(ActiveRecord::StatementInvalid) { Release::DurationCache.refresh_recent!(limit: 3) }
+    end
+  end
+
+  # --- RefreshResult: the comparison the exit status is derived from -----------
+
+  test "a total no-op is a shortfall no allowance can excuse" do
+    result = Release::DurationCache::RefreshResult.new(3, [], %w[a b c])
+
+    assert_predicate result, :no_op?
+    assert_match(/rewrote NOTHING/, result.shortfall(allowance: 99))
+  end
+
+  test "0 of 0 is a complete run, not a no-op" do
+    result = Release::DurationCache::RefreshResult.new(0, [], [])
+
+    refute_predicate result, :no_op?
+    assert_nil result.shortfall(allowance: 0), "an empty board must not red a post-deploy hook"
+    assert_match(/refreshed 0 of 0/, result.summary)
+  end
+
+  test "a skip past the allowance is a shortfall that names the release" do
+    result = Release::DurationCache::RefreshResult.new(3, %w[a b], %w[c])
+
+    refute_predicate result, :no_op?
+    assert_nil result.shortfall(allowance: 1), "within the allowance, the run may ship"
+    assert_match(/skipped 1 of 3/, result.shortfall(allowance: 0))
+    assert_match(/c/, result.shortfall(allowance: 0))
+  end
+
+  # --- the escape hatch, and its refusal to be disarmed by a typo --------------
+
+  test "the skip allowance defaults to zero and reads an operator override" do
+    assert_equal 0, Release::DurationCache::REFRESH_SKIP_ALLOWANCE,
+                 "the population is bounded by the limit, so a flat allowance would swallow it whole"
+    assert_equal 0, Release::DurationCache.refresh_skip_allowance(env: {})
+    assert_equal 2, Release::DurationCache.refresh_skip_allowance(env: { "REFRESH_MAX_SKIPPED" => "2" })
+  end
+
+  test "a garbled allowance falls back to the default rather than disarming the guard" do
+    %w[all -1 2.5 yes].each do |raw|
+      assert_equal Release::DurationCache::REFRESH_SKIP_ALLOWANCE,
+                   Release::DurationCache.refresh_skip_allowance(env: { "REFRESH_MAX_SKIPPED" => raw }),
+                   "#{raw.inspect} must not be read as permission to skip"
+    end
+  end
 end

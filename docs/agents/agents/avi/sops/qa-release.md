@@ -511,13 +511,26 @@ are to eject it or to fix it forward — never to re-run harder.
 **A member left `reviewed` on a GREEN QA run is not a bug — it is the per-repo
 evidence guard.** `qa_green!` stamps a member `assembled` only when the candidate
 recorded something for **every** repo that member names (a QA sha or a passing
-pre-QA gate; gem repos are exempt, since they publish rather than deploy). A
-member spanning a repo this candidate never promoted stays `reviewed` — swept,
+pre-QA gate). Two kinds of repo are exempt, and both are exempt because they
+**declare** it, never because their config merely looks empty:
+
+- **gem repos** — they publish rather than deploy, so they carry neither a QA sha
+  nor an ff'd `main`.
+- **a repo declaring `qa_evidence: exempt`** in `config/release_repos.yml` —
+  today only **turf-vault**, an Anchor program with no dyno and no URL, whose
+  pre-QA gate and QA deploy are both skipped by design.
+
+A member spanning a repo this candidate never promoted stays `reviewed` — swept,
 `merged: "release"`, and picked up by the next self-healing run once its missing
 repo rides — and the reason is logged as `[release-evidence] <release>: <slug>
 names N repo(s) … but this release landed nothing for <repo>`. The ship has the
 same guard against `metadata["shipped_shas"]`, so such a member stays `assembled`
 rather than being stamped `shipped` for a repo whose `main` never moved.
+
+**The QA exemption does NOT extend to the ship.** `bin/release ship` really does
+fast-forward turf-vault's `release → main` and records the sha at the push, so
+its `shipped` stamp is backed by real evidence and the ship-side guard stays
+armed for it exactly as for any app.
 
 **The `merged: "main"` stamp is NOT withheld with it** — say the half that still
 bites rather than imply a clean stop. `record_merged_main` fires per repo-group
