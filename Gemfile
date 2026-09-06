@@ -88,7 +88,7 @@ group :test do
   gem "selenium-webdriver"
   # minitest 6.0 dropped minitest/mock (Object#stub / Minitest::Mock); the suite
   # relies on Object#stub. Rails only needs >= 5.15, so pin to the 5.x line.
-  gem "minitest", "~> 5.25"
+  gem "minitest", "~> 6.0"
 end
 gem "dotenv-rails", groups: [:development, :test]
 gem "redcarpet"
