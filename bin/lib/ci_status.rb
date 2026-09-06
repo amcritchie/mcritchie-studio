@@ -482,6 +482,20 @@ module CiStatus
   #                       not honour: adding the cert produced a BYTE-IDENTICAL
   #                       refusal, so an operator who followed it burned a full-suite
   #                       run for nothing (/tasks/exempt-refusal-prints-dead-remedy).
+  #   cert_route: :retired
+  #                     — the RELEASE-grain path (G3), where the local-cert route was
+  #                       RETIRED rather than waived. It denies like `false` and for a
+  #                       DIFFERENT reason, which is why it is a third value and not a
+  #                       reuse: `false` says "the tier gate is already waived", true
+  #                       of a doc-only diff and false of a release SHA. It also names
+  #                       the command the operator re-runs instead of the `<task>`
+  #                       placeholder, which G3 has nothing to fill
+  #                       (/tasks/release-offers-retired-cert).
+  #                       ONE CALLER TODAY: bin/release.rb's G3 pre-QA gate. It is NOT
+  #                       the third route bin/dor-check's "could not be proven
+  #                       doc-only" branches want — theirs is "this refusal is not the
+  #                       suite gate's at all", a different sentence about a
+  #                       task-grain gate, still open and still unfixed here.
   #
   # WHY THE DEFAULT IS `true`, SAID ACCURATELY. The parameter was added for the
   # CI-VERDICT callers, where a full cert has always stood in — so `true` preserves
@@ -529,19 +543,20 @@ module CiStatus
   #                                         banner promises about the CI VERDICT exactly
   #                                         what the primary's gate-zero goes on to do
   #                                         with a cert on that same PR.
-  #   bin/release.rb G3 pre-QA  DEFAULT   — and it SHOULD NOT BE. The local-cert route
-  #                                         was deliberately retired at G3 (CI's verdict
-  #                                         for the release SHA is the gate; there is no
-  #                                         cert to substitute) and the line prints a
-  #                                         literal `<task>` placeholder besides.
-  #                                         Pre-existing, release-grain, unchanged by
-  #                                         this task and out of its scope — named here,
-  #                                         and filed as its own follow-up, so the next
-  #                                         reader inherits the finding instead of
-  #                                         rediscovering it.
+  #   bin/release.rb G3 pre-QA  :retired  — FIXED (/tasks/release-offers-retired-cert).
+  #                                         It took the default and so OFFERED a cert on
+  #                                         a gate that retired the route: re-derived at
+  #                                         source, bin/release.rb names no cert
+  #                                         mechanism anywhere and ci_pass? (:green) is
+  #                                         its ONLY pass, so `bin/full-suite-check`
+  #                                         could not advance it however faithfully it
+  #                                         was run. `false` was not the fix — its
+  #                                         doc-only premise is untrue of a release SHA
+  #                                         — so the denial it now prints is :retired's,
+  #                                         which also drops the unfillable `<task>`.
   #
-  # Both branches are pinned — a default that nobody asserts is how the wrong half goes
-  # quietly stale.
+  # All three branches are pinned — a default that nobody asserts is how the wrong half
+  # goes quietly stale.
   def self.unreadable_remedy(repo = nil, cause: nil, cert_route: true)
     where = repo.to_s.strip.empty? ? "this repo" : repo.to_s.strip
     fix = case cause&.to_sym
@@ -580,9 +595,34 @@ module CiStatus
               "answer — App tokens are forbidden from it by design), reproduce the exact check read, and use " \
               "GitHub's response to choose the credential or permission fix."
           end
-    route = if cert_route
-              "certify in full instead: bin/full-suite-check <task>."
-            else
+    route = case cert_route
+            when :retired
+              # THE RETIRED ROUTE — a gate that never had a cert to substitute, as
+              # opposed to one whose cert was waived. Both DENY, and they deny for
+              # DIFFERENT REASONS, so they may not share a sentence: the exempt text
+              # below rests on "the shape/test-tier gate is already waived", which is
+              # false at a RELEASE-grain gate reading a diff nobody exempted. Handing
+              # `false` to a release gate would print a true verdict on a false
+              # premise, which is the same species of defect as the offer it replaces.
+              #
+              # NO `<task>` PLACEHOLDER, and that is the second half of the fix. The
+              # gated route names `bin/full-suite-check <task>`; at G3 there is no
+              # task to substitute for `<task>` — the subject is a release SHA
+              # carrying many tasks — so the placeholder was unfillable as well as
+              # unhonourable. The command named here is the one the operator actually
+              # re-runs, spelled as bin/release.rb's sibling abort branches spell it.
+              #
+              # "no local cert stands in" is the CONTRACT CLAUSE, spelled identically
+              # in all three denying places (here, the exempt branch below, and
+              # ci_gate.rb's :none/:unverified branch), because
+              # test/lib/dor_check_exempt_ci_test.rb reads the printed refusal to
+              # decide what the gate PROMISED and then executes that promise.
+              "and no local cert stands in for it at the G3 pre-QA gate either: that gate is RELEASE-grain " \
+                "and SHA-addressed — it certifies origin/release's tip on GitHub's verdict alone, so there is " \
+                "no task-grain suite whose result could be substituted. Fixing the credential is the only " \
+                "route — this gate advances on a GREEN CI for that SHA and nothing else; re-run " \
+                "`bin/release prepare` once the read works."
+            when false, nil
               # NO ROUTE IS NAMED because none exists here, and inventing one is the
               # defect. On the exempt path the tier gate is ALREADY waived, so there
               # is no suite whose result could be substituted for the verdict — the
@@ -596,6 +636,8 @@ module CiStatus
               "and no local cert stands in for it on a doc-only diff either: the shape/test-tier gate is " \
                 "already waived, so there is no suite left to substitute. Fixing the credential is the only " \
                 "route — this gate advances on a GREEN CI and nothing else."
+            else
+              "certify in full instead: bin/full-suite-check <task>."
             end
     "This is a CREDENTIAL fault or API limit, NOT a missing CI — re-running will never clear it. #{fix} " \
       "Until the check read works, the FAST-cert route cannot be credited on this repo (a fast cert needs a " \

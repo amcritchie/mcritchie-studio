@@ -765,15 +765,17 @@ class DorCheckExemptCiTest < Minitest::Test
   #                       defaults are the suite-gate refusal and the submit-side
   #                       note, both on the GATED path where a cert genuinely clears.
   #   bin/pr-review       1 stating / 0 default — cert_route: !maybe_exempt.
-  #   bin/release.rb      0 stating / 1 default — the G3 pre-QA gate, where the
-  #                       local-cert route was retired. Known-wrong, pre-existing,
-  #                       release-grain, filed as its own follow-up; pinned at 1 so
-  #                       that fixing it (or adding a second) has to come back here.
+  #   bin/release.rb      1 stating / 0 default — the G3 pre-QA gate, which STATES
+  #                       cert_route: :retired since /tasks/release-offers-retired-cert.
+  #                       It is the one entry here that has MOVED: it was 0/1, and the
+  #                       pin at 1 default is what brought the fix back to this file.
+  #                       Totals went 3/3 → 4/2 in that one diff; re-derive rather than
+  #                       trusting either number, with the scan below.
   UNREADABLE_REMEDY_CALL_SITES = {
     "bin/lib/ci_gate.rb" => { states_route: 1, takes_default: 0 },
     "bin/dor-check" => { states_route: 1, takes_default: 2 },
     "bin/pr-review" => { states_route: 1, takes_default: 0 },
-    "bin/release.rb" => { states_route: 0, takes_default: 1 }
+    "bin/release.rb" => { states_route: 1, takes_default: 0 }
   }.freeze
 
   # pr_read_alert's OWN callers, counted by route. It prints from four branches and is
