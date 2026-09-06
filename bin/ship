@@ -83,6 +83,7 @@ require "optparse"
 require_relative "lib/repo_root"
 require_relative "lib/cert_root_guard"
 require_relative "lib/fast_lane"
+require_relative "lib/fast_cert"
 require_relative "lib/gh_auth_retry"
 require_relative "lib/pr_overlap"
 require_relative "lib/migration_collision"
@@ -392,11 +393,39 @@ if FastLane.cert_fresh?(devops["checks_run"], fingerprint)
   say "2/8 cert — fresh cert evidence already recorded for #{fingerprint.to_s[0, 12]}; skipping bin/fast-check."
 else
   say "2/8 cert — running bin/fast-check #{slug}"
-  unless system(FAST_CHECK_BIN, slug, chdir: root)
+  cert_ok = system(FAST_CHECK_BIN, slug, chdir: root)
+  cert_status = $?&.exitstatus
+  if cert_ok
+    # certified locally — nothing to say that fast-check has not already said.
+  elsif cert_status == FastCert::DEFERRED_EXIT
+    # THE DEFERRAL, AND WHY THE POLICY LIVES HERE (capped-cert-blocks-the-pr).
+    #
+    # bin/fast-check has just told us it could execute ZERO test files because the mapped
+    # lane was CAPPED, and has recorded a fingerprint-bound receipt saying so. It cannot
+    # decide what happens next: the only evidence that can settle this diff is a CI run,
+    # and a CI run needs a PUSH and a PR — both of which are steps 3 and 4 of THIS script.
+    # A cert runner that pushed would be a cert runner that ships.
+    #
+    # So detection sits with the cert and the decision sits here, and the decision is:
+    # CARRY ON. The refusal is not dropped, it is MOVED — step 7's dor-check credits the
+    # receipt only beside a GREEN CI, and refuses a red one, an absent one, one it could
+    # not read, and a receipt gone stale under a later edit. What the builder gets back is
+    # the ~30 minutes of local full suite that the old step-2 death charged them for
+    # evidence CI was about to produce anyway.
+    deferred_cert = true
+    say "2/8 cert — DEFERRED to CI (see above): no local lane could certify this diff, so the " \
+        "cert receipt now rides on the PR's CI. Continuing to push + PR; step 7 REFUSES unless CI is GREEN."
+    unless CiWait.enabled?(ENV)
+      # Worth its own line: with the wait disarmed the usual outcome is a step-7 refusal on a
+      # CI that simply has not reported yet, and the builder would read that as a real block.
+      say "2/8 cert — NOTE: SHIP_CI_WAIT=off and this diff has no local cert, so step 7 will " \
+          "refuse until CI reports. Leave the wait armed for a deferred cert."
+    end
+  else
     # TWO DIFFERENT ERRANDS, and "fix the red lane" is the wrong one for half of them.
-    # bin/fast-check now REFUSES a diff it cannot certify — a capped mapped lane over an
-    # empty spine executes no test, so it exits 1 with nothing red. Sending that reader
-    # to hunt a failing lane is the same misdirection the cert itself keeps stamping out.
+    # bin/fast-check REFUSES a diff it cannot certify at all — a diff that maps to NO test,
+    # over an empty spine, executes nothing, so it exits 1 with nothing red. Sending that
+    # reader to hunt a failing lane is the same misdirection the cert keeps stamping out.
     die!("bin/fast-check did NOT certify — read its output above. A RED lane means fix the " \
          "failure. A REFUSAL means this diff cannot be fast-certified at all (it names the " \
          "command that covers it — usually bin/full-suite-check #{slug}). Either way, re-run " \
@@ -673,6 +702,14 @@ if CiWait.enabled?(ENV)
     reporter: ->(state, polls, left) { say "6/8 ci — #{state}; #{left.round}s left (poll #{polls})" }
   )
   say "6/8 ci — #{CiWait.summary(wait)}"
+  # A DEFERRED cert has NO local evidence underneath it, so a non-green settle here is not
+  # the usual "provisional handoff" — it is the whole gate. Say which situation the reader
+  # is in BEFORE dor-check's refusal, so the refusal reads as expected rather than as a
+  # surprise. (dor-check still owns the verdict; this line grades nothing.)
+  if deferred_cert && wait.state.to_s.to_sym != :green
+    say "6/8 ci — this diff's cert was DEFERRED to CI, so CI is the ONLY evidence: step 7 will " \
+        "REFUSE on anything but a settled GREEN. Deferring is not skipping."
+  end
   # Named, not silent: every give-up path hands a NON-green state to dor-check, and
   # the operator must be able to tell "CI said no" from "we stopped asking" from
   # "we never got through" — three different facts with three different remedies.
@@ -705,6 +742,15 @@ presence!(:dor)
 
 say "7/8 dor — running bin/dor-check #{slug}"
 unless system(DOR_CHECK_BIN, slug, chdir: root)
+  if deferred_cert
+    # The fence closing, exactly as designed. Name it as such: a builder who watched step 2
+    # say "continuing" needs to read this as the gate doing its job, not as a new fault.
+    die!("bin/dor-check refused — and this diff's cert was DEFERRED to CI at step 2, so a GREEN CI is " \
+         "the ONLY thing that can satisfy the suite gate for it. Read what it flagged above: a RED CI " \
+         "means fix the failure and push; NO CI / a CI still running means re-run bin/ship #{slug} once " \
+         "it reports; an edit since the deferral means re-run bin/fast-check #{slug} first (the receipt is " \
+         "tree-bound). To settle it locally instead: bin/full-suite-check #{slug}.")
+  end
   die!("bin/dor-check refused — fix everything it flagged, then re-run bin/ship #{slug} (it resumes here).")
 end
 

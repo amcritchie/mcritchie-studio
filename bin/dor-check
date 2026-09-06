@@ -1339,6 +1339,64 @@ def suite_evidence_error(eval, slug, ci, review_role)
   end
 
   lanes = eval[:lanes] || {}
+
+  # THE DEFERRED CASE FIRST, because its remedy is the one the generic text gets WRONG.
+  #
+  # A deferred diff has no full-suite lane and no fast lane — so without this branch the
+  # refusal below reads "full-suite: MISSING, rubocop: MISSING, run bin/full-suite-check".
+  # That is the ~30-minute command this whole change exists to stop charging for, and it
+  # would be offered as the FIRST remedy to the one builder we already know cannot afford
+  # it. Worse, it says nothing about the receipt that IS on the board, so re-running
+  # bin/fast-check (which defers again, correctly) reads as a loop with no exit.
+  #
+  # The honest sentence names what is missing — the GREEN CI — and orders the remedies by
+  # what the CI state actually is.
+  if lanes[FullSuiteGate::DEFER_LANE] == :fresh
+    state = ci && ci[:state] ? ci[:state].to_s.upcase : "UNKNOWN"
+    guidance =
+      case ci && ci[:state]
+      when :red
+        "CI is RED — fix the failing checks and push; the deferral stands and the next green settles it"
+      when :none
+        # THE FAILURE MODE THIS BRANCH EXISTS FOR: a capped diff that pushed, got no CI at
+        # all, and would otherwise submit on nothing. It refuses, and it refuses LOUDLY.
+        "there is NO CI on this PR, so there is NO evidence for this diff anywhere — a deferral is not a " \
+          "skip. Check the PR actually triggered a run (a stale base branch runs nothing: rebase onto " \
+          "origin/#{ci && !ci[:base].to_s.empty? ? ci[:base] : 'accepted'}), then re-run"
+      when :pending
+        "CI is still RUNNING — re-run once it reports (bin/ship waits for exactly this)"
+      when :conflicted then CiStatus.conflicted_remedy(ci)
+      when :ci_less then CiStatus.ci_less_remedy(ci)
+      when :unreadable
+        # DO NOT RE-PRINT THE CREDENTIAL REMEDY HERE. A deferral can never clear an
+        # unread CI (that needs a FULL cert, which a deferral is by definition not), so
+        # the CI gate's own :unreadable error is ALWAYS raised beside this one and it
+        # already carries the ~500-character token remedy in full. Printing it twice in
+        # a single verdict is precisely how a reader learns to skim the thing we most
+        # need them to read — the same call the fast-cert branch above makes for the
+        # same reason. Point at it instead, and say what is specific to a deferral.
+        "the CI gate's error beside this one carries the credential remedy — refresh the token and re-read, " \
+          "because a deferral has NO local run underneath it to fall back on while the check read is refused"
+      else
+        "no green CI could be read for this PR, and a deferral has no local run underneath it to fall " \
+          "back on"
+      end
+    return "this diff's cert was DEFERRED to GitHub CI — bin/fast-check could execute ZERO test files " \
+      "(the mapped lane was CAPPED over a spine this checkout resolves none of), so it recorded a " \
+      "receipt instead of a cert and CI is the ONLY evidence there is. CI is currently #{state}. " \
+      "#{guidance}; or certify locally in full and stop depending on CI for this diff: " \
+      "bin/full-suite-check #{slug}."
+  end
+
+  # A receipt for a DIFFERENT tree is not a receipt for this one. Called out separately
+  # because "STALE" against a lane the builder never ran by name is otherwise unreadable.
+  if lanes[FullSuiteGate::DEFER_LANE] == :stale
+    return "the cert DEFERRAL recorded for this task is STALE (#{stale_delta(eval, FullSuiteGate::DEFER_LANE)}) " \
+      "— the code moved after it was recorded, so the CI run it points at graded a tree that is not this one. " \
+      "Re-run bin/fast-check #{slug} (it re-defers in seconds if the diff is still capped), push, and let CI " \
+      "settle on the new tree; or certify locally in full: bin/full-suite-check #{slug}."
+  end
+
   if lanes[FullSuiteGate::FAST_LANE] == :fresh
     state = ci && ci[:state] ? ci[:state].to_s.upcase : "UNKNOWN"
     guidance =
@@ -2586,7 +2644,7 @@ end
 # behavior identical and fails closed for shapes not yet written;
 # test/lib/feature_shape_tiers_test.rb makes a zero-tier shape declare the key.
 suite_eval = nil
-suite_route = nil # "full" | "fast" | "fast-provisional" | "bypass" when satisfied
+suite_route = nil # "full" | "fast" | "deferred" | "fast-provisional" | "bypass" when satisfied
 if gate != "build" && shape_def && shape_def.fetch("full_suite_gate", true)
   if foreign_root && task_fingerprint_override.nil?
     # Root guard, remedy 3 (see the guard block above). The root is NOT the task's
@@ -2696,10 +2754,33 @@ if gate != "build" && shape_def && shape_def.fetch("full_suite_gate", true)
         "DOR_CHECK_DIFF_ROOT=<task worktree>, then re-run."
     end
     fast_fresh = suite_eval.dig(:lanes, FullSuiteGate::FAST_LANE) == :fresh
+    defer_fresh = suite_eval.dig(:lanes, FullSuiteGate::DEFER_LANE) == :fresh
     if suite_eval[:ok]
       suite_route = suite_eval[:bypass] ? "bypass" : "full"
     elsif fast_fresh && ci && ci[:state] == :green
       suite_route = "fast"
+    elsif defer_fresh && ci && ci[:state] == :green
+      # THE DEFERRED ROUTE (capped-cert-blocks-the-pr) — the fence the whole change
+      # turns on, and it is deliberately the STRICTEST route on this ladder.
+      #
+      # bin/fast-check recorded a "[cert-deferred@<fp>]" receipt because NO local lane
+      # could certify this tree: the mapped lane was CAPPED (more mapped tests than the
+      # cap, not fewer) over a spine this checkout resolves none of. Every one of those
+      # mapped tests runs on CI, on this exact tree, in the run the PR was going to
+      # trigger anyway — so a GREEN CI is not a substitute for the missing local cert,
+      # it is the same suite run somewhere cheaper.
+      #
+      # WHAT MAKES IT A FENCE AND NOT A HOLE, in one line each:
+      #   * GREEN ONLY. There is no provisional twin below, and that asymmetry is the
+      #     point. A fast cert may be credited against a pending CI because a real local
+      #     run stands underneath it; a deferral has NOTHING underneath it, so pending,
+      #     absent (:none), unread and red all fall through to the refusal.
+      #   * FINGERPRINT-BOUND. The receipt is a tree hash, so an edit after the deferral
+      #     goes :stale and lands here as no route at all.
+      #   * ROLE-INDEPENDENT, exactly like the fast route: review's gate-zero enforces
+      #     the same settled green, so a deferred task is graded by the same evidence at
+      #     submit and at review.
+      suite_route = "deferred"
     elsif fast_fresh && !review_role && ci && %i[pending none].include?(ci[:state])
       # ci-gate-review-handoff: the builder submits without the CI wait. The PR is
       # OPEN and its CI will settle; review's gate-zero holds the strict verdict.
@@ -3091,6 +3172,7 @@ if gate_emission_enabled?(options, gate, slug)
       entry["cmd"] =
         case suite_route
         when "fast" then "fast-cert@#{fp12}+ci-green"
+        when "deferred" then "cert-deferred@#{fp12}+ci-green"
         when "fast-provisional" then "fast-cert@#{fp12}+ci-pending"
         else "certified@#{fp12}"
         end
@@ -3217,6 +3299,14 @@ if ready
   elsif suite_route == "fast"
     fp = suite_eval[:fingerprint]
     puts "  fast cert accepted#{fp ? " at #{fp[0, 12]}" : ""} (GitHub CI green carries the full suite)"
+  elsif suite_route == "deferred"
+    # SAY WHAT IS CARRYING THE VERDICT. There is no local cert here at all, and a reader
+    # who cannot tell that from a normal fast cert cannot weigh this verdict. The waiver
+    # rule of this file applies to evidence as much as to tiers: name it, or it reads
+    # exactly like a gate that enforced one.
+    fp = suite_eval[:fingerprint]
+    puts "  cert DEFERRED to CI#{fp ? " at #{fp[0, 12]}" : ""} — no local lane could certify this diff " \
+         "(mapped lane CAPPED over an empty spine), so the GREEN GitHub CI below IS the cert"
   elsif suite_route == "fast-provisional"
     fp = suite_eval[:fingerprint]
     puts "  ⚠ fast cert accepted PROVISIONALLY#{fp ? " at #{fp[0, 12]}" : ""} — CI hasn't settled; " \

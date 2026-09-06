@@ -1476,7 +1476,9 @@ A task **may not advance `submitted → reviewed`** unless, for its shape:
   `test/models/x_test.rb`, views → their controller test, `bin/tool` →
   `test/lib/tool_test.rb` — with a class-name grep fallback) **plus** the curated
   core spine (`config/fast_cert_spine.yml`) and `rubocop` on the **changed files
-  only**, stamping a fingerprint-bound `[fast-cert@<fp>]` line. `bin/dor-check`
+  only**, stamping a fingerprint-bound `[fast-cert@<fp>]` line (or, when the diff is
+  too wide for the mapped lane's cap and the spine is empty, a `[cert-deferred@<fp>]`
+  receipt that defers the cert to a GREEN CI). `bin/dor-check`
   credits a FRESH fast cert **only alongside a green GitHub CI** — a red,
   pending, missing, or unverified CI does not credit it. `bin/full-suite-check`
   stays unchanged as the CI-independent local cert and the release-verification

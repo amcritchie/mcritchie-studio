@@ -30,7 +30,10 @@ self-closes its own `g1_cert` window, and CI stays a **handoff, not a gate**
   `config/feature_shapes.yml`).
 - The **suite evidence** proves the tree being shipped is certified — a fresh
   fast-cert or full-suite line, fingerprint-bound to the git TREE hash (see
-  [g1-cert.md](g1-cert.md) for the three routes).
+  [g1-cert.md](g1-cert.md) for the three routes). A diff no local lane could
+  certify at all (the mapped lane CAPPED over an empty spine) carries a
+  **`[cert-deferred@<fp>]` receipt** instead, credited **only** beside a GREEN
+  CI — never provisionally, because there is no local run underneath it.
 - The task's **required metadata** is populated.
 - The PR's **live GitHub CI** is not failing (a red, closed/merged,
   merge-conflicted, or **ci-less** PR is refused — `mergeStateStatus DIRTY`
@@ -442,6 +445,12 @@ The gate's own semantics, unchanged:
   **ci-less** PR) still refuses, and a fast cert with
   **no PR at all** is refused — the provisional credit is anchored to an open PR
   whose CI will run.
+  **A DEFERRED cert has no provisional twin**, deliberately: a fast cert may be
+  credited against a pending CI because a real local run stands underneath it, so
+  for a deferral a pending CI, an **absent** CI (`:none`), an unread CI and a red
+  CI all refuse. That asymmetry is the fence — a capped diff that pushed, got no
+  CI at all, and submitted on nothing would recreate the fail-green
+  `capped-cert-reports-green` closed, one rung further along.
 - **Review side (`dor_review`, the authoritative verdict):** the `pr-review`
   supervisor checks the PR's live CI **before spawning reviewers** — red bounces
   the task back naming the failing checks (recorded as a failed `dor_review`
@@ -467,7 +476,8 @@ attempt n+1.
 
 - The builder's verdict **opens then closes `dor`** with `success = ready`,
   attaching its evidence as SOPs: `dor-check`, `tiers` (the shape's tier list),
-  `full-suite-evidence` (`certified@<fp12>`, `fast-cert@<fp12>+ci-green`, or the
+  `full-suite-evidence` (`certified@<fp12>`, `fast-cert@<fp12>+ci-green`,
+  `cert-deferred@<fp12>+ci-green`, or the
   provisional `fast-cert@<fp12>+ci-pending`), and `ci` (pass / fail / **pending**
   / unverified / **unreadable**).
   - **`unreadable`** = the GitHub token was REFUSED (401/403) reading CI — as

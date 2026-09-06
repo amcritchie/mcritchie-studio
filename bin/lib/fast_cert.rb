@@ -166,6 +166,18 @@ module FastCert
   # this broad.
   DEFAULT_MAPPED_CAP = 15
 
+  # THE DEFERRAL'S EXIT STATUS — the whole signal, and deliberately NOT 0.
+  #
+  # Every existing caller reaches bin/fast-check through `system(...)`, whose truthiness
+  # is "exited 0". A deferral is NOT a certification, so it must stay FALSY there: any
+  # caller that has not been taught about deferral keeps treating it exactly as it treats
+  # a refusal, which is the safe reading. Only bin/ship reads the STATUS and knows that
+  # this particular non-zero means "carry on to the PR, the fence is at step 7".
+  #
+  # Exiting 0 here would have been a one-line change and would have recreated PR #1226's
+  # bug one rung along: a green-looking cert over zero executed tests.
+  DEFERRED_EXIT = 2
+
   def mapped_cap
     raw = ENV["FAST_CHECK_MAPPED_CAP"].to_s.strip
     return DEFAULT_MAPPED_CAP if raw.empty?
@@ -241,41 +253,99 @@ module FastCert
   # runs — an uncapped mapped lane on a broad diff is the ~31-minute local suite the fast
   # lane exists to avoid.
   #
-  # Returns the refusal text (the caller prefixes "fast-check: " and aborts), or nil when
-  # at least one test path will run. Mirrors the string-or-nil shape of the script's other
-  # preconditions — CertRootGuard.refusal, DeskGuard.refusal, CertTreeGuard.refusal.
-  def zero_test_refusal(mapped_only, spine, cap, slug: nil)
+  # WHERE THE REFUSAL LANDS IS NOT WHERE IT HELPS, and that is what this tri-state fixes.
+  #
+  # bin/fast-check runs at ship STEP 2 OF 8 — before the push, before the PR, before any CI
+  # exists. So the refusal above, correct as a verdict, left the builder holding a diff with
+  # NO PR and exactly one remedy: a local full suite, MEASURED at ~30 minutes against CI's ~9
+  # for the identical command. That is the wall-clock the fast lane was built to avoid, and a
+  # build paid it in full on 2026-09-06.
+  #
+  # AND IT IS A SATELLITE CONDITION, NOT A CAP CONDITION — which is why the split below keys
+  # on the ZERO and merely READS the cap, rather than keying on the cap itself.
+  # config/fast_cert_spine.yml has five entries and ALL FIVE exist only in the hub (measured
+  # 2026-09-06: turf-monster 0 of 5, rolio 0 of 5). So one capped diff splits two ways, both
+  # observed the same day:
+  #
+  #   HUB       release-offers-retired-cert — bin/release.rb mapped 50 files, 51 paths over
+  #             the cap → mapped lane skipped → THE SPINE STILL RAN → certified green and
+  #             accepted against a green CI. The cap cost coverage, not the PR. Untouched here.
+  #   SATELLITE empty-solana-network-fails-open (turf-monster) — 29 paths over the cap →
+  #             mapped lane skipped → spine resolves to NOTHING → zero executed tests →
+  #             REFUSED, and the builder paid the ~30 minutes.
+  #
+  # The population that needs the deferral is therefore the six non-hub repos, and a fix that
+  # moved the HUB half would be over-broad. Nothing below can reach a run that executed a test.
+  #
+  # THE TWO ZERO-EVIDENCE CASES ARE NOT THE SAME FACT, and separating them is the whole idea:
+  #
+  #   CAPPED  → :defer. Reached only when the spine ALSO resolved to nothing, i.e. on a
+  #             satellite. The diff DID map to real, relevant test files — MORE than the cap,
+  #             not fewer. Every one of them runs on CI, on this exact tree, in the run that
+  #             was going to happen anyway. Nothing about the evidence is missing; only the
+  #             RUNNER is wrong, and we chose that ourselves for a budget reason. So the cert
+  #             defers: it records a fingerprint-bound receipt saying no local lane could
+  #             certify this tree, and dor-check credits that receipt ONLY beside a GREEN CI.
+  #
+  #   UNMAPPED → :refuse, unchanged and byte-identical. Here the diff maps to NOTHING: no
+  #             convention target, no grep hit, no spine. That is a fact about the DIFF — the
+  #             suite contains nothing that reads this code — and it is worth telling the
+  #             builder rather than routing around. Deferring it would be deleting the guard
+  #             for one of its two doors, not relocating its evidence.
+  #
+  # DEFERRING IS NOT SKIPPING. The refusal is not weakened; it MOVES, from step 2 to step 7,
+  # where dor-check owns it. A red CI, an absent CI, a CI nobody could read, and a receipt gone
+  # stale under a later edit all still refuse the submit — and they refuse it with the PR open,
+  # which is the only place the evidence could ever have come from.
+  #
+  # THE CAP ITSELF IS UNTOUCHED, and so is every run that executes a test. A capped run with a
+  # live spine, and every ordinary diff, return nil here exactly as before.
+  #
+  # Returns nil when at least one test path will run, or a Hash the caller acts on:
+  #   { kind: :refuse, message: } — abort (the caller prefixes "fast-check: ")
+  #   { kind: :defer,  message:, detail: } — record the receipt, exit DEFERRED
+  def zero_test_outcome(mapped_only, spine, cap, slug: nil)
     return nil unless executed_test_paths(mapped_only, spine, cap).empty?
 
     task = slug.to_s.strip.empty? ? "<task>" : slug.to_s.strip
-    capped = !!(cap && cap[:capped])
-    why =
-      if capped
-        culprit =
-          if cap[:worst_path]
-            " (widest: #{cap[:worst_path]} → #{cap[:worst_count]} test file(s))"
-          else
-            ""
-          end
-        "the mapped lane was CAPPED — #{cap[:count]} mapped path(s) over the cap of " \
-          "#{cap[:cap]}#{culprit} — so it ran nothing"
-      else
-        "the diff maps to NO test file — no convention target, and no word-boundary grep hit"
-      end
-    override =
-      if capped
-        "\n  (or run the mapped lane anyway, deliberately: FAST_CHECK_MAPPED_CAP=#{cap[:count]} " \
-          "bin/fast-check #{task} — that is the broad local suite this cap exists to avoid.)"
-      else
-        ""
-      end
+    return defer_outcome(cap, task) if cap && cap[:capped]
 
+    { kind: :refuse, message: refuse_message(task) }
+  end
+
+  # The UNMAPPED refusal — the half that does not move. Kept verbatim from the guard PR
+  # 1226 added, because the case it describes has not changed.
+  def refuse_message(task)
     "REFUSING TO CERTIFY — this run would execute ZERO test files, so there is nothing to " \
-      "certify. #{why}, and this checkout resolves NO spine entries (the spine list is " \
+      "certify. the diff maps to NO test file — no convention target, and no word-boundary " \
+      "grep hit, and this checkout resolves NO spine entries (the spine list is " \
       "anchored in the hub; a satellite checkout resolves none of it). That leaves rubocop " \
       "as the only lane, and a linter cannot observe behaviour — a green cert here would be " \
       "a verdict on evidence that does not exist. Run the cert that DOES cover this diff:" \
-      "\n    bin/full-suite-check #{task}#{override}"
+      "\n    bin/full-suite-check #{task}"
+  end
+
+  # The CAPPED deferral. `detail` is what goes on the recorded receipt — it must name the
+  # cap, the count and the culprit, because a receipt nobody can read back to a cause is how
+  # a deferral becomes a shrug. `message` is what the builder reads, and it says the two
+  # things they need: nothing was certified here, and what has to be true later.
+  def defer_outcome(cap, task)
+    culprit = cap[:worst_path] ? " (widest: #{cap[:worst_path]} → #{cap[:worst_count]} test file(s))" : ""
+    detail = "cert DEFERRED to GitHub CI: the mapped lane was CAPPED — #{cap[:count]} mapped " \
+             "path(s) over the cap of #{cap[:cap]}#{culprit} — over a spine this checkout " \
+             "resolves NONE of, so NO local lane could certify this tree. CI runs the full " \
+             "suite on this exact code; bin/dor-check credits this receipt only alongside a " \
+             "GREEN CI, never provisionally."
+    message =
+      "NOT CERTIFIED — DEFERRING to GitHub CI. This run would execute ZERO test files: " \
+      "#{detail}" \
+      "\n  What happens next: bin/ship pushes and opens the PR anyway, waits for CI, and " \
+      "bin/dor-check REFUSES the submit unless CI is GREEN. A red CI, no CI, or an edit " \
+      "after this receipt all still block — deferring is not skipping." \
+      "\n  Prefer to certify locally instead? bin/full-suite-check #{task}" \
+      "\n  (or run the mapped lane anyway, deliberately: FAST_CHECK_MAPPED_CAP=#{cap[:count]} " \
+      "bin/fast-check #{task} — that is the broad local suite this cap exists to avoid.)"
+    { kind: :defer, message: message, detail: detail }
   end
 
   # --- spine --------------------------------------------------------------------

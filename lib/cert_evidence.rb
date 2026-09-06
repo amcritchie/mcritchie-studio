@@ -109,6 +109,17 @@ module CertEvidence
   # builder back to re-run it, which is how the cert-wipe bug of 2026-07-12 taught
   # people to hand-write evidence. NOT a lane the full cert waits on (see LANES).
   CONTROL_LANE = "control"
+  # A cert that was DEFERRED to GitHub CI (bin/fast-check, capped mapped lane over
+  # an empty spine). NOT a cert and never green on its own: it is the machine's
+  # record that NO local lane could certify THIS tree, and that the evidence is
+  # therefore the CI run of the commit this tree becomes. bin/dor-check credits it
+  # only alongside a GREEN CI — never provisionally, unlike the fast lane, because
+  # there is no local run underneath it to be provisional ABOUT.
+  #
+  # Fingerprint-bound and machine-owned for the same reasons as the lanes above: a
+  # receipt an author `--checks` update could wipe would strand the build, and one
+  # that survived an edit would defer a tree CI never saw.
+  DEFER_LANE = "cert-deferred"
   # The FULL-cert lanes (what "certified" means: full suite + full rubocop, both
   # fresh). The fast lane is separate — it only satisfies the gate paired with a
   # green GitHub CI, which is bin/dor-check's call. The control lane is separate
@@ -119,7 +130,7 @@ module CertEvidence
   # fingerprint grading; membership of LANES would buy a universal requirement.
   LANES = [TEST_LANE, RUBOCOP_LANE].freeze
   # Every fingerprint-bound lane — the whole machine-owned namespace.
-  EVIDENCE_LANES = (LANES + [FAST_LANE, CONTROL_LANE]).freeze
+  EVIDENCE_LANES = (LANES + [FAST_LANE, CONTROL_LANE, DEFER_LANE]).freeze
 
   module_function
 

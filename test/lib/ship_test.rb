@@ -113,7 +113,12 @@ class ShipTest < Minitest::Test
       if "#{marker}" == "GH" && ARGV[0, 2] == %w[pr create]
         puts "#{PR_URL}"
       end
-      exit(ENV["FAIL_#{marker}"] == "1" ? 1 : 0)
+      # EXIT_<MARKER> pins an EXACT status, because one stub now has to model a
+      # verdict that is neither success nor failure: bin/fast-check exits 2 to say
+      # DEFERRED (not certified, but carry on to the PR — capped-cert-blocks-the-pr).
+      # FAIL_<MARKER>=1 stays the plain red.
+      forced = ENV["EXIT_#{marker}"].to_s
+      exit(forced.empty? ? (ENV["FAIL_#{marker}"] == "1" ? 1 : 0) : forced.to_i)
     RUBY
     FileUtils.chmod("+x", stub)
     stub
@@ -615,6 +620,80 @@ class ShipTest < Minitest::Test
       assert_equal ["TASK show", "FAST #{SLUG}"], markers(lines), "nothing may run past the red cert"
       _remote = `git -C #{dir} rev-parse origin/#{BRANCH} 2>/dev/null`.strip
       refute $?.success?, "the branch must NOT be pushed on a red cert"
+    end
+  end
+
+  # --- the DEFERRED cert (capped-cert-blocks-the-pr) ----------------------------
+  #
+  # bin/fast-check exits 2 when it could execute ZERO test files because the mapped
+  # lane was CAPPED. That is NOT a certification — it is a recorded deferral to the
+  # PR's CI — and ship is where the decision to carry on lives, because the evidence
+  # a deferral points at needs a PUSH and a PR, which are steps 3 and 4 of this
+  # script. A cert runner that pushed would be a cert runner that ships.
+
+  def test_a_deferred_cert_carries_on_to_the_push_the_pr_and_the_dor_verdict
+    with_repo do |dir|
+      out, err, status, lines = run_ship(dir, extra_env: { "EXIT_FAST" => "2" })
+
+      assert status.success?, "a deferral must NOT stop the line at step 2: #{err}"
+      assert_includes err, "2/8 cert — DEFERRED to CI"
+      assert_includes err, "step 7 REFUSES unless CI is GREEN",
+                      "the builder must be told what still has to be true"
+      assert_includes markers(lines), "GH pr", "the PR must actually be opened — that is the whole remedy"
+      assert_includes markers(lines), "DOR #{SLUG}", "and the verdict gate must still run"
+      assert_includes out, "stage: submitted (read back verified)"
+    end
+  end
+
+  # THE FENCE, SHIP-SIDE. dor-check owns the verdict, and when it refuses a deferred
+  # diff ship must not present that as a new fault: the builder watched step 2 say
+  # "continuing", so the refusal has to read as the gate closing on schedule.
+  def test_a_deferred_cert_whose_dor_verdict_refuses_never_reaches_submitted
+    with_repo do |dir|
+      _out, err, status, lines = run_ship(dir, extra_env: { "EXIT_FAST" => "2", "FAIL_DOR" => "1" })
+
+      refute status.success?, "deferring is not skipping — a refused DoR verdict must fail the ship"
+      assert_includes err, "cert was DEFERRED to CI at step 2"
+      assert_includes err, "GREEN CI is the ONLY thing that can satisfy the suite gate"
+      refute_includes markers(lines), "TASK move", "the task must NOT cross the submitted seam"
+    end
+  end
+
+  # AN ABSENT CI IS THE FAILURE MODE THIS WHOLE CHANGE IS DESIGNED AGAINST: a capped
+  # diff that pushes, gets no CI at all, and submits on nothing. Ship names the stakes
+  # BEFORE the verdict, so the refusal that follows is legible rather than a surprise.
+  def test_a_deferred_cert_names_the_stakes_when_ci_never_appears
+    with_repo do |dir|
+      _out, err, status, = run_ship(dir, extra_env: { "EXIT_FAST" => "2", "FAIL_DOR" => "1",
+                                                      "SHIP_CI_STATE" => "state:none" })
+
+      refute status.success?
+      assert_includes err, "CI is the ONLY evidence"
+      assert_includes err, "Deferring is not skipping."
+    end
+  end
+
+  # A DEFERRAL WITH THE CI WAIT DISARMED is a step-7 refusal waiting to happen, so it
+  # is called out at step 2 rather than left to look like a broken gate ten minutes on.
+  def test_a_deferred_cert_warns_when_the_ci_wait_is_disarmed
+    with_repo do |dir|
+      _out, err, = run_ship(dir, extra_env: { "EXIT_FAST" => "2", "SHIP_CI_WAIT" => "off" })
+
+      assert_includes err, "SHIP_CI_WAIT=off and this diff has no local cert"
+    end
+  end
+
+  # AND THE PLAIN REFUSAL STILL STOPS THE LINE. Exit 1 is not exit 2, and the
+  # difference must be structural rather than a matter of wording: a diff that maps to
+  # NO test at all has no CI story to defer to, so nothing may be pushed for it.
+  def test_a_refusing_cert_exit_one_still_aborts_before_push
+    with_repo do |dir|
+      _out, err, status, lines = run_ship(dir, extra_env: { "EXIT_FAST" => "1" })
+
+      refute status.success?
+      assert_includes err, "bin/fast-check did NOT certify"
+      assert_equal ["TASK show", "FAST #{SLUG}"], markers(lines),
+                   "a refusal pushes nothing — only a DEFERRAL carries on"
     end
   end
 

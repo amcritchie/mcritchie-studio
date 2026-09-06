@@ -638,19 +638,105 @@ class FastCheckTest < Minitest::Test
     [dir, write]
   end
 
-  def test_a_capped_lane_over_an_empty_spine_refuses_instead_of_certifying
+  # WHAT PR #1226 ESTABLISHED, KEPT: this run still does not certify, still emits no
+  # "[fast-cert@" line, and still runs no test. WHAT CHANGED: the verdict is DEFERRED
+  # rather than refused, because the refusal landed at ship step 2 of 8 — before the
+  # push, before the PR, before any CI — and its only remedy was a ~30-minute local
+  # suite against CI's ~9 for the identical command. The evidence moves to CI; the
+  # demand for evidence does not move at all (bin/dor-check requires the GREEN).
+  def test_a_capped_lane_over_an_empty_spine_DEFERS_instead_of_certifying
     with_wide_mapping_repo do |dir, write|
       with_empty_spine(dir, write)
 
       out, code, lines = run_check(dir, merge_stderr: true)
 
-      assert_equal 1, code, "a run that executes no test must not exit 0:\n#{out}"
-      assert_match(/REFUSING TO CERTIFY/, out)
+      assert_equal 2, code, "a deferral is NOT success — it must stay falsy to every system() caller:\n#{out}"
+      assert_match(/NOT CERTIFIED — DEFERRING to GitHub CI/, out)
       refute_match(/fast cert green/, out,
-                   "the exact defect: a green cert over zero executed tests:\n#{out}")
+                   "the exact defect this must never become: a green cert over zero executed tests:\n#{out}")
       refute_match(/\[fast-cert@/, out,
-                   "no evidence line may be emitted — there is no evidence")
-      assert_empty lane_calls(lines, "TEST"), "no test lane ran, which is the point"
+                   "no CERT line may be emitted — nothing was certified")
+      assert_match(/\[cert-deferred@[0-9a-f]{7,64}(?::[^\]\s]+)?\]/, out,
+                   "a RECEIPT is emitted instead, fingerprint-bound like every other lane")
+      assert_empty lane_calls(lines, "TEST"), "no test lane ran, which is still the point"
+    end
+  end
+
+  # THE SCOPE, PINNED IN ONE TEST. The refusal this change relocates is a SATELLITE
+  # condition, not a cap condition, and nothing else in this file states that as a
+  # contrast. config/fast_cert_spine.yml has five entries and ALL FIVE exist only in
+  # the hub (measured 2026-09-06: turf-monster 0 of 5, rolio 0 of 5), so ONE capped
+  # diff splits two ways — and both halves were observed on real builds the same day:
+  #
+  #   HUB       51 paths over the cap → mapped lane skipped → THE SPINE STILL RAN →
+  #             certified green and accepted against a green CI. The cap cost
+  #             coverage, not the PR.
+  #   SATELLITE 29 paths over the cap → mapped lane skipped → spine resolves to
+  #             NOTHING → zero executed tests → the builder paid ~30 minutes of local
+  #             full suite before he could open a PR.
+  #
+  # Same diff, same cap, opposite outcomes — so a fix that changed the HUB half would
+  # be over-broad, and one that keyed on the cap instead of on the zero would change
+  # exactly the wrong half. This asserts both halves from one fixture.
+  def test_the_hub_shape_certifies_and_only_the_satellite_shape_defers
+    with_wide_mapping_repo do |dir, _|
+      hub_out, hub_code, hub_lines = run_check(dir, merge_stderr: true)
+
+      assert_equal 0, hub_code, "the HUB half: a capped lane over a LIVE spine still certifies:\n#{hub_out}"
+      assert_match(/fast cert green: 0 mapped \(CAPPED:/, hub_out)
+      refute_match(/DEFERRING/, hub_out, "the hub must not acquire a deferral it never needed")
+      assert_equal [["test/models/spine_core_test.rb"]], lane_calls(hub_lines, "TEST"),
+                   "and the spine is what makes it certifiable"
+    end
+
+    with_wide_mapping_repo do |dir, write|
+      write.call("spine.yml", "spine: []\n") # the satellite: none of the hub's spine resolves
+
+      sat_out, sat_code, sat_lines = run_check(dir, merge_stderr: true)
+
+      assert_equal 2, sat_code, "the SATELLITE half: the same cap over NO spine defers:\n#{sat_out}"
+      assert_match(/DEFERRING to GitHub CI/, sat_out)
+      assert_empty lane_calls(sat_lines, "TEST"), "nothing could run — that is the whole condition"
+    end
+  end
+
+  # THE RECEIPT IS THE DEFERRAL, so it has to REACH THE BOARD — dor-check grades the
+  # record, not the message. Recorded through the same `--checks` funnel the green path
+  # uses (bin/task merges client-side against the board's current state, so the write
+  # cannot clobber the builder's tier lines even on a board that predates this lane).
+  def test_a_deferred_run_records_its_receipt_on_the_board
+    with_wide_mapping_repo do |dir, write|
+      with_empty_spine(dir, write)
+
+      out, code, lines = run_check(dir, args: ["some-task"], merge_stderr: true,
+                                   extra_env: { "TASK_SHOW_JSON" => SHOW_JSON,
+                                                "FAST_CHECK_SKIP_ORPHAN_GUARD" => "1" })
+
+      assert_equal 2, code, out
+      update = lines.find { |l| l[0] == "TASK" && l[1] == "update" }
+      refute_nil update, "the receipt must be RECORDED, or the deferral is a shrug: #{lines.inspect}"
+      recorded = update[update.index("--checks") + 1]
+      assert_match(/\A\[cert-deferred@[0-9a-f]{7,64}/, recorded, "recorded as the DEFERRAL lane: #{recorded}")
+      assert_match(/CAPPED/, recorded, "and the record carries the cause")
+      assert_match(/read-back confirms/, out, "the write is VERIFIED, never declared")
+      assert_empty lines.select { |l| l[0] == "GATE" },
+                   "still no g1_cert attempt — no lane ran, so there is no testing window to report"
+    end
+  end
+
+  # A RECEIPT THAT DID NOT LAND IS WORSE THAN A REFUSAL: ship would push, open the PR,
+  # wait out CI, and dor-check would then refuse for want of the receipt — the same
+  # 30 minutes, spent later and less legibly. So an unrecordable deferral REFUSES.
+  def test_a_deferral_that_cannot_be_recorded_refuses_instead
+    with_wide_mapping_repo do |dir, write|
+      with_empty_spine(dir, write)
+
+      out, code, = run_check(dir, args: ["some-task"], merge_stderr: true, fail_token: "update",
+                             extra_env: { "TASK_SHOW_JSON" => SHOW_JSON,
+                                          "FAST_CHECK_SKIP_ORPHAN_GUARD" => "1" })
+
+      assert_equal 1, code, "an unrecordable deferral is a REFUSAL, not a deferral:\n#{out}"
+      assert_match(/FAILED to record the receipt/, out)
     end
   end
 
@@ -660,23 +746,29 @@ class FastCheckTest < Minitest::Test
     with_wide_mapping_repo do |dir, write|
       with_empty_spine(dir, write)
 
-      out, = run_check(dir, merge_stderr: true)
+      out, code, = run_check(dir, merge_stderr: true)
 
-      assert_match(/CAPPED — 20 mapped path\(s\) over the cap of 15/, out)
-      assert_match(%r{widest: config/initializers/widget\.rb}, out)
-      assert_match(/NO spine entries/, out, "the OTHER half of the cause is named too")
+      assert_equal 2, code, out
+      assert_match(/CAPPED/, out, "what tripped it")
+      assert_match(%r{config/initializers/widget\.rb}, out, "the culprit file")
       assert_match(%r{bin/full-suite-check}, out, "the remedy is named")
       assert_match(/FAST_CHECK_MAPPED_CAP=20/, out, "the deliberate override stays discoverable")
     end
   end
 
-  # NOTHING IS RECORDED AND NO G1 ATTEMPT IS STAMPED. The guard is a precondition on the
-  # SELECTION, decided before any lane — like the root, desk, and dirty-tree guards — so
-  # a refused run leaves the board exactly as it found it. An attempt that ran no lane
-  # would otherwise report a testing window that measured nothing.
+  # NOTHING IS RECORDED AND NO G1 ATTEMPT IS STAMPED for a run that truly REFUSES. The
+  # guard is a precondition on the SELECTION, decided before any lane — like the root,
+  # desk, and dirty-tree guards — so a refused run leaves the board exactly as it found
+  # it. An attempt that ran no lane would otherwise report a window that measured
+  # nothing. (Driven on the UNMAPPED diff, which is the door that still refuses; the
+  # capped door now writes its receipt, asserted above.)
   def test_a_refused_run_writes_nothing_to_the_board_or_the_gate
     with_wide_mapping_repo do |dir, write|
       with_empty_spine(dir, write)
+      # UNMAPPED, not capped: drop the branch diff's initializer (whose generic grep
+      # token is what maps wide) and leave prose, which maps to nothing at all.
+      FileUtils.rm_f(File.join(dir, "config/initializers/widget.rb"))
+      write.call("docs/note.md", "prose only\n")
 
       _, code, lines = run_check(dir, args: ["some-task"], merge_stderr: true,
                                  extra_env: { "FAST_CHECK_SKIP_ORPHAN_GUARD" => "1" })
