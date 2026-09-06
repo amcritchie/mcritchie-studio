@@ -497,6 +497,26 @@ module CiStatus
   #                       suite gate's at all", a different sentence about a
   #                       task-grain gate, still open and still unfixed here.
   #
+  # `also_refused:` KEEPS THE EXEMPT CLOSING LINE FROM OUTRUNNING THE GATE. That
+  # branch used to end flatly "this gate advances on a GREEN CI and nothing else."
+  # True the day it was written, and FALSE since PR #1225
+  # (/tasks/exempt-path-trusts-local-tree) taught the exempt REVIEW path to refuse on
+  # an unread PR file list as well: green became NECESSARY there and stopped being
+  # SUFFICIENT. In the co-fire — one stale token refusing the PR read AND the check
+  # read — the CI half still closed by promising that green alone would carry it,
+  # which sends the reader to a fix that leaves the verdict exactly where it was.
+  #
+  # So the clause is DERIVED from the refusals actually standing on this verdict,
+  # never asserted. This is bin/dor-check's `refused_by` idiom (the closing line of
+  # the same exempt refusal, added by that same PR) reused deliberately rather than a
+  # second idiom invented next to it: pass the OTHER live refusals, each a noun
+  # phrase, and the sentence names them instead of denying they exist.
+  #
+  # EMPTY IS THE COMMON CASE AND MUST STAY BYTE-IDENTICAL. The builder role never
+  # reaches this refusal (unread_ci_refusal is review-only) and a review with a
+  # readable PR file list passes nothing, so the sentence operators already know is
+  # what an empty list still prints, to the byte. Only the co-fire reads differently.
+  #
   # WHY THE DEFAULT IS `true`, SAID ACCURATELY. The parameter was added for the
   # CI-VERDICT callers, where a full cert has always stood in — so `true` preserves
   # what every pre-existing caller already printed. It is NOT a claim that every such
@@ -531,8 +551,9 @@ module CiStatus
   #                                         prints the doc-only denial, which is untrue
   #                                         on a code diff. What it wants is a THIRD
   #                                         route ("this refusal is not the suite
-  #                                         gate's"), shared with the release.rb site
-  #                                         below. Measured and left as a handle in
+  #                                         gate's"), still unwritten — NOT `:retired`,
+  #                                         whose note above says so in as many words.
+  #                                         Measured and left as a handle in
   #                                         test/lib/dor_check_exempt_ci_test.rb's
   #                                         honour-the-remedy property.
   #   bin/dor-check suite gate  true      — gated path; the cert it names is the cert
@@ -557,7 +578,40 @@ module CiStatus
   #
   # All three branches are pinned — a default that nobody asserts is how the wrong half
   # goes quietly stale.
-  def self.unreadable_remedy(repo = nil, cause: nil, cert_route: true)
+
+  # THE LEGAL ROUTES, ENUMERATED — and the reason is that `case` FAILS OPEN.
+  #
+  # For as long as this parameter was true/false/nil, an unknown value was not
+  # reachable by a typo: those three are the only spellings they have. `:retired`
+  # (PR #1235) made the route SYMBOL-VALUED, and a symbol is the first value a caller
+  # can misspell silently — `cert_route: :retried` fell straight through the case's
+  # `else` and printed the GATED path's cert offer on a gate that retired the route.
+  # That is the precise defect :retired was added to fix, wearing a typo, and nothing
+  # would have caught it: the call-site registry in
+  # test/lib/dor_check_exempt_ci_test.rb partitions on the STRING "cert_route:", so a
+  # misspelled VALUE still counts as a caller that states its route, and the suite
+  # stays green.
+  #
+  # SHARED WITH bin/lib/ci_gate.rb, not copied. `unread_ci_refusal` forwards this same
+  # parameter and branches on it for a state that never reaches this method
+  # (`:none`/`:unverified`), so a fence living only here would leave that branch open.
+  # One list, one raise, both entry points.
+  CERT_ROUTES = [true, false, nil, :retired].freeze
+
+  # FAIL CLOSED ON AN UNKNOWN ROUTE. An unclassified route is not evidence that the
+  # default is safe; it is evidence that a caller and this method disagree about what
+  # the gate is offering — which is the whole subject of the string below.
+  def self.validate_cert_route!(cert_route)
+    return cert_route if CERT_ROUTES.include?(cert_route)
+
+    raise ArgumentError, "unknown cert_route #{cert_route.inspect} — expected one of " \
+                         "#{CERT_ROUTES.inspect}. Classify the new route in " \
+                         "CiStatus.unreadable_remedy's header and add it to CERT_ROUTES; do not let it " \
+                         "take a branch by falling through."
+  end
+
+  def self.unreadable_remedy(repo = nil, cause: nil, cert_route: true, also_refused: [])
+    validate_cert_route!(cert_route)
     where = repo.to_s.strip.empty? ? "this repo" : repo.to_s.strip
     fix = case cause&.to_sym
           when :permissions
@@ -633,9 +687,29 @@ module CiStatus
               # decide what the gate PROMISED and then executes that promise. One
               # spelling for one meaning is what lets the pin be a property instead
               # of a list of cases.
+              # THE CLOSING CLAUSE IS DERIVED, NOT ASSERTED — see `also_refused:` in the
+              # header. An EMPTY list means nothing else is refusing this verdict, and
+              # it prints the sentence operators already know, to the byte; the
+              # regression pins that equality rather than trusting the eye.
+              #
+              # WHY THE CO-FIRE WORDING SPLITS THE CLAIM IN TWO. "Fixing the credential"
+              # stays the route to a CI VERDICT — that half was never false, and one
+              # stale token really does refuse both reads, so the operator's next move
+              # is unchanged. What was false is the SUFFICIENCY: green no longer
+              # carries this path by itself. Saying "necessary and not sufficient" and
+              # then NAMING the other refusal is what stops a reader fixing the
+              # credential, re-running, and meeting a refusal the gate had told them
+              # could not happen.
+              closing = if also_refused.empty?
+                          "Fixing the credential is the only route — this gate advances on a GREEN CI and " \
+                            "nothing else."
+                        else
+                          "Fixing the credential is the only route to a CI VERDICT, but a GREEN CI is " \
+                            "NECESSARY AND NOT SUFFICIENT here: this verdict is ALSO refused by " \
+                            "#{also_refused.join(' AND ')}, and no CI result clears that."
+                        end
               "and no local cert stands in for it on a doc-only diff either: the shape/test-tier gate is " \
-                "already waived, so there is no suite left to substitute. Fixing the credential is the only " \
-                "route — this gate advances on a GREEN CI and nothing else."
+                "already waived, so there is no suite left to substitute. #{closing}"
             else
               "certify in full instead: bin/full-suite-check <task>."
             end

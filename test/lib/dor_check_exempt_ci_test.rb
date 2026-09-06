@@ -926,4 +926,162 @@ class DorCheckExemptCiTest < Minitest::Test
     assert_equal PR_READ_ALERT_CALL_SITES[:predicate], predicates,
                  "bare `pr_read_alert` uses (predicate only — the string is discarded) changed to #{predicates}"
   end
+
+  # ── the closing line that outlived its truth ────────────────────────────────
+  #
+  # THE DEFECT (/tasks/gate-sentence-outlived-truth). CiStatus.unreadable_remedy's
+  # exempt branch closed flatly: "Fixing the credential is the only route — this gate
+  # advances on a GREEN CI and nothing else." True when it was written. FALSE since
+  # PR #1225 taught this same path to refuse on an unread PR file list as well, which
+  # made green NECESSARY here and stopped it being SUFFICIENT. The co-fire is the case
+  # that shows it — one stale App token refuses the PR read AND the check read at
+  # once, so both halves fire on one verdict and the CI half signs off by promising
+  # that fixing the credential and getting a green would carry it. It would not: the
+  # PR-read refusal is still standing.
+  #
+  # WHY THE FIX IS A DERIVATION AND NOT A REWRITE, which is what these two tests are
+  # really pinning as a PAIR. The sentence is correct in one world and wrong in
+  # another, and the worlds differ by ONE input — whether anything else is refusing.
+  # So a fix that reworded it unconditionally would be a second defect wearing the
+  # first one's clothes: it would change what operators already read on every
+  # non-co-fire refusal, which is most of this branch's traffic. The pair below is
+  # deliberately identical but for `pr_files:`.
+
+  # The sentence operators already know, pinned as a LITERAL. Recomputing it from the
+  # method under test would make the fence agree with any rewrite of that method,
+  # which is the fence disarmed rather than the fence passing.
+  GREEN_SUFFICIENT = "Fixing the credential is the only route — this gate advances on a GREEN CI and nothing else."
+  GATED_OFFER = "certify in full instead: bin/full-suite-check <task>."
+  CO_FIRE_CLAIM = "NECESSARY AND NOT SUFFICIENT"
+  REMEDY_CAUSES = [:permissions, :credentials, :authentication, :rate_limit, :forbidden, nil].freeze
+  REMEDY_REPO = "McRitchie-Studio/myapp"
+
+  # END TO END THROUGH THE REAL BINARY, not through CiGate directly, and that is the
+  # point: CiGate can format the derived clause perfectly while bin/dor-check never
+  # hands it the list, and a unit test on the formatter would pass either way. This
+  # drives the wiring.
+  def test_the_co_fire_closing_names_both_refusals_in_the_review_role
+    verdict, code = check(devops, ci: "unreadable", role: "review", pr_files: "unverified")
+    errors = errors_of(verdict)
+
+    assert_equal 1, code, "the co-fire must refuse:\n#{errors}"
+    refute_includes errors, GREEN_SUFFICIENT,
+                    "THE DEFECT: the CI half still promises that a green CI alone advances this gate, " \
+                    "while the PR-read refusal below it says otherwise on the same verdict:\n#{errors}"
+    assert_includes errors, CO_FIRE_CLAIM,
+                    "the closing must say green is necessary and NOT sufficient here:\n#{errors}"
+    assert_includes errors, "the PR's own file list going unread",
+                    "the closing must NAME the other refusal, not merely hedge about it — that is the " \
+                    "refused_by idiom PR #1225 established next door:\n#{errors}"
+  end
+
+  # THE FENCE (acceptance 2). Same fixture, same role, same unreadable CI — only the
+  # PR read succeeds. Nothing else is refusing, so green really is sufficient and the
+  # operator must read the sentence they have always read, to the byte.
+  def test_the_exempt_closing_is_unchanged_when_ci_is_the_only_refusal
+    verdict, code = check(devops, ci: "unreadable", role: "review", pr_files: DOC_DIFF)
+    errors = errors_of(verdict)
+
+    assert_equal 1, code, "an unreadable CI still refuses a review:\n#{errors}"
+    assert_includes errors, GREEN_SUFFICIENT,
+                    "with nothing else refusing, the wording operators know must survive VERBATIM — an " \
+                    "over-broad fix that reworded it here is the failure this test exists to catch:\n#{errors}"
+    refute_includes errors, CO_FIRE_CLAIM,
+                    "nothing else is refusing this verdict, so the co-fire clause must not appear:\n#{errors}"
+    refute_includes errors, "the PR's own file list going unread",
+                    "the PR read SUCCEEDED here; naming it would be the misnamed-refusal defect:\n#{errors}"
+  end
+
+  # THE GATED PATH, PROVEN INERT to the new parameter across every cause. Acceptance 2
+  # is about wording operators already know, and the gated route carries most of this
+  # method's traffic — so the assertion is EQUALITY against the un-parameterised call,
+  # not merely "still contains the offer".
+  def test_unit_the_gated_route_is_untouched_by_the_derivation
+    REMEDY_CAUSES.each do |cause|
+      plain = CiStatus.unreadable_remedy(REMEDY_REPO, cause: cause, cert_route: true)
+      loaded = CiStatus.unreadable_remedy(REMEDY_REPO, cause: cause, cert_route: true,
+                                          also_refused: ["something else refused too"])
+
+      assert_equal plain, loaded,
+                   "#{cause.inspect}: the GATED route must ignore also_refused entirely — its closing is " \
+                   "the cert offer, which no other refusal changes"
+      assert_includes plain, GATED_OFFER, "#{cause.inspect}: the gated offer is the wording being fenced"
+      refute_includes plain, CO_FIRE_CLAIM, "#{cause.inspect}: the derived clause must not leak here"
+    end
+  end
+
+  # AND THE EXEMPT ROUTE WITH AN EMPTY LIST — the default every non-co-fire caller
+  # takes — is byte-identical too. Stated on the METHOD as well as through the binary
+  # because the binary test above can only reach one cause.
+  def test_unit_an_empty_also_refused_prints_the_original_exempt_closing
+    REMEDY_CAUSES.each do |cause|
+      [false, nil].each do |route|
+        remedy = CiStatus.unreadable_remedy(REMEDY_REPO, cause: cause, cert_route: route)
+
+        assert remedy.end_with?(GREEN_SUFFICIENT),
+               "#{cause.inspect}/#{route.inspect}: an empty also_refused must close with the original " \
+               "sentence, to the byte:\n#{remedy}"
+      end
+    end
+  end
+
+  # ── the route fence (findings 1 and 2 of this task's review) ────────────────
+
+  # `case` FAILS OPEN, and `:retired` made that reachable. While the route was
+  # true/false/nil there was no way to misspell it; a SYMBOL can be typed wrong, and
+  # `:retried` fell through the `else` and printed the GATED cert offer — on a gate
+  # that retired the cert route, which is the precise defect `:retired` was added to
+  # fix. The call-site registry cannot catch it: it partitions on the STRING
+  # "cert_route:", so a misspelled VALUE still counts as a caller that states its
+  # route and the suite stays green.
+  def test_unit_a_misspelled_cert_route_raises_instead_of_printing_the_gated_offer
+    error = assert_raises(ArgumentError) do
+      CiStatus.unreadable_remedy(REMEDY_REPO, cause: :credentials, cert_route: :retried)
+    end
+
+    assert_includes error.message, ":retried", "the refusal must name the value it rejected"
+    refute_includes error.message, GATED_OFFER,
+                    "the typo must not reach the gated branch even to quote it"
+  end
+
+  # ONE FENCE, BOTH ENTRY POINTS. CiGate.unread_ci_refusal forwards this parameter on
+  # one branch and BRANCHES ON IT on another (:none/:unverified) that never reaches
+  # unreadable_remedy at all — so a fence living only downstream would leave that
+  # branch open to the same typo.
+  def test_unit_the_route_fence_is_shared_with_ci_gate
+    error = assert_raises(ArgumentError) do
+      CiGate.unread_ci_refusal({ state: :none }, PR_URL, "t", cert_route: :retried)
+    end
+
+    assert_includes error.message, ":retried"
+  end
+
+  # FINDING 2. bin/lib/ci_gate.rb branched on the TRUTHINESS of the route, and
+  # `:retired` is truthy — so a release-grain route reaching that branch would be
+  # offered `bin/full-suite-check` AND have its refusal marked cert-CLEARABLE, which
+  # is the dead-remedy defect twice over. Unreachable today (both CiGate.verdict
+  # callers pass literals), which is exactly when it is cheap to close.
+  def test_unit_a_retired_route_neither_offers_a_cert_nor_marks_it_clearable
+    %i[none unverified].each do |state|
+      message, clears = CiGate.unread_ci_refusal({ state: state }, PR_URL, "t", cert_route: :retired)
+
+      refute clears, "#{state}: a retired route must never mark a refusal cert-clearable"
+      refute_includes message, "certify in full instead",
+                      "#{state}: :retired is truthy — a truthiness branch offers the cert it retired:\n#{message}"
+      assert_includes message, "no local cert stands in",
+                      "#{state}: the denial must carry the shared CONTRACT CLAUSE:\n#{message}"
+    end
+  end
+
+  # THE TWO READINGS OF ONE FACT ARE ONE STRING. The closing `refused_by` line and the
+  # `also_refused:` list handed to the CI remedy describe the SAME refusal to the same
+  # reader, in one verdict. Written twice they drift; bin/lib/ci_status.rb's header
+  # names that exact failure ("a second copy is a second thing to forget").
+  def test_unit_the_pr_read_refusal_phrase_is_written_once
+    source = File.read(File.join(REPO_ROOT, "bin/dor-check"))
+
+    assert_equal 1, source.scan("the PR's own file list going unread").size,
+                 "the PR-read refusal phrase must exist ONCE in bin/dor-check, as PR_READ_REFUSAL_PHRASE — " \
+                 "the refused_by line and the also_refused list must both read that constant"
+  end
 end

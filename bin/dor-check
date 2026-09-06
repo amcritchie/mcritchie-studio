@@ -239,6 +239,16 @@ end
 options = { json: false, file: nil, gate: "merge", gate_role: "builder", diff_base: false, suite_fingerprint: false }
 GATES = %w[merge build].freeze
 GATE_ROLES = %w[builder review].freeze
+
+# THE PR-READ REFUSAL, NAMED ONCE. Two places on the exempt path have to describe this
+# refusal to the operator, and they must not drift apart: the closing `refused_by` line
+# (which half refused THIS verdict) and the `also_refused:` list handed to the CI
+# refusal's own remedy (what a green CI would still not clear). They were one sentence
+# written twice for about a minute, which is the "second copy is a second thing to
+# forget" failure bin/lib/ci_status.rb's header names — so it is a constant, and the two
+# readings of the same fact are literally the same string.
+PR_READ_REFUSAL_PHRASE = "the PR's own file list going unread, so the doc-only exemption was never proven " \
+                         "against the artifact this gate judges"
 OptionParser.new do |o|
   o.banner = "Usage: bin/dor-check <task-slug> [--gate merge|build] [--gate-role builder|review] [--json] | bin/dor-check --file task.json"
   o.on("--gate GATE", "Boundary to check: merge (default, submitted→reviewed) or build (designed→building)") { |v| options[:gate] = v }
@@ -2048,10 +2058,22 @@ if EXEMPT_KINDS.include?(kind)
     # promise and the behaviour one decision: `exempt_cert_clears` is now false
     # BECAUSE the text offers no cert, not merely alongside it.
     exempt_ci = gate == "build" ? nil : CiStatus.evaluate(devops["pr_url"], ENV["DOR_CHECK_CI_STATUS"])
+    # WHAT ELSE IS ALREADY REFUSING THIS VERDICT, handed down so the CI refusal's own
+    # closing line cannot promise that a green CI alone would carry this path. Read
+    # from the SAME list the closing `refused_by` line below reads, and resolved ABOVE
+    # this point (the PR read is asked before CI is), so the two sentences a reader
+    # meets in one refusal are computed from one fact rather than agreeing by habit.
+    #
+    # EMPTY IN THE BUILDER ROLE BY CONSTRUCTION, and that is the fence, not an
+    # accident: there the PR-read refusal lands in `exempt_alerts` as a SUGGESTION, so
+    # nothing but CI is refusing and green really is sufficient — the remedy prints the
+    # sentence it always printed, to the byte.
+    exempt_also_refused = exempt_pr_read_errors.empty? ? [] : [PR_READ_REFUSAL_PHRASE]
     exempt_ci_error, exempt_cert_clears, exempt_ci_notes =
       if exempt_ci
         CiGate.verdict(exempt_ci, review_role: review_role, pr_url: devops["pr_url"],
-                                  slug: task["slug"] || slug, cert_route: false)
+                                  slug: task["slug"] || slug, cert_route: false,
+                                  also_refused: exempt_also_refused)
       else
         [nil, false, []]
       end
@@ -2147,10 +2169,7 @@ if EXEMPT_KINDS.include?(kind)
         # CI's sentence. Never empty: !exempt_ready holds exactly when one of them is.
         refused_by = []
         refused_by << "the CI verdict, which an exempt diff does not escape" if exempt_ci_error
-        unless exempt_pr_read_errors.empty?
-          refused_by << "the PR's own file list going unread, so the doc-only exemption was never proven " \
-                        "against the artifact this gate judges"
-        end
+        refused_by << PR_READ_REFUSAL_PHRASE unless exempt_pr_read_errors.empty?
         puts "  → the shape/test-tier gate IS waived (the OBSERVED diff ships no behavior) — this refusal is " \
              "#{refused_by.join(' AND ')}"
         puts "  → not ready to advance #{boundary}; resolve the above"
@@ -2890,12 +2909,19 @@ end
 # The rule: for CI_NO_VERDICT_STATES only, a FULL local cert stands in for the CI
 # verdict. Two independent reasons, and either one alone would be enough:
 #
-#   * THE GATE MUST HONOUR ITS OWN REMEDY. unreadable_remedy has always ENDED by
-#     naming the full cert — "certify in full instead: bin/full-suite-check <task>" —
-#     and bin/full-suite-check calls itself the ONLY route available for a repo whose
-#     CI dor-check cannot read. Refusing that cert made the gate hand the reader an
-#     instruction it would then reject, which is worse than a plain no: it teaches
-#     people the gate is noise, and an ignored gate is how a genuinely RED CI ships.
+#   * THE GATE MUST HONOUR ITS OWN REMEDY. On THIS route — `cert_route: true`, the
+#     gated one — unreadable_remedy ends by naming the full cert, "certify in full
+#     instead: bin/full-suite-check <task>", and bin/full-suite-check calls itself the
+#     ONLY route available for a repo whose CI dor-check cannot read. "ALWAYS ends by
+#     naming that command" is what this bullet used to say, and it has been false
+#     since PR #1221 gave the EXEMPT route a denial instead of an offer; PR #1235's
+#     `:retired` route made it false a second time, and this task's derived exempt
+#     closing a third. The scope clause is the whole correction: the promise is the
+#     GATED route's, and only there is it honoured below.
+#
+#     Refusing that cert made the gate hand the reader an instruction it would then
+#     reject, which is worse than a plain no: it teaches people the gate is noise,
+#     and an ignored gate is how a genuinely RED CI ships.
 #
 #   * THE EVIDENCE IS NO LONGER WEAKER. The historical reason to prefer CI was that a
 #     local cert ran `bin/rails test` while CI also ran the browser test:system lane.

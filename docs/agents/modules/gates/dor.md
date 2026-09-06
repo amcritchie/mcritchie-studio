@@ -507,7 +507,11 @@ attempt n+1.
     `bin/full-suite-check` cert stands in for the CI verdict, and the gate then
     says so on the ready line (`advancing on the FULL local cert instead … CI
     itself was NOT read`). Two reasons: the gate must **honour the remedy it
-    prints** — `unreadable_remedy` has always ended by naming that command — and
+    prints** — on **this** route, `cert_route: true`, `unreadable_remedy` ends by
+    naming that command (it does **not** on the others: the exempt route has
+    printed a denial since PR #1221, `:retired` names `bin/release prepare`
+    instead, and the exempt closing is now derived — so "always ends by naming
+    that command", which this line used to say, was false three times over) — and
     the cert is no longer weaker evidence, because `bin/full-suite-check` now runs
     `ci.yml`'s verbatim command, `test:system` included. A **fast** cert is not
     enough, and a `[full-suite-bypass]` is a declared hatch rather than evidence,
