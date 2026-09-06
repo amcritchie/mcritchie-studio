@@ -314,8 +314,8 @@ GEM
       rbs (>= 4.0.0)
       tsort
     redcarpet (3.6.1)
-    redis (5.4.1)
-      redis-client (>= 0.22.0)
+    redis (6.0.0)
+      redis-client (= 0.30.1)
     redis-client (0.30.1)
       connection_pool
     regexp_parser (2.11.3)
@@ -463,7 +463,7 @@ DEPENDENCIES
   rack-attack
   rails (~> 8.1)
   redcarpet
-  redis (~> 5.4)
+  redis (~> 6.0)
   resend (~> 1.6)
   rubocop-rails-omakase
   ruby-vips (>= 2.2.1, < 3)
