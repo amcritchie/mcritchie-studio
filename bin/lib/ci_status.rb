@@ -525,16 +525,6 @@ module CiStatus
   #                                         full_cert_stands_in_for_ci? then credits.
   #   bin/dor-check submit note true      — gated path suggestion; suppressed when the
   #                                         review allow-list already refused.
-  #   bin/dor-check deferred    DEFAULT   — and the default is RIGHT here. The cert for
-  #                                         this diff was DEFERRED to CI (the mapped
-  #                                         lane capped over an empty spine), so there
-  #                                         is no local run underneath it — but a FULL
-  #                                         local cert is precisely what would satisfy
-  #                                         the gate: it makes suite_eval[:ok] true and
-  #                                         full_cert_stands_in_for_ci? credits it
-  #                                         against the unread CI. So "certify in full
-  #                                         instead" is a true offer, and the branch's
-  #                                         own refusal already names the command.
   #   bin/pr-review             COMPUTED  — cert_route: !maybe_exempt, so the pre-review
   #                                         banner promises about the CI VERDICT exactly
   #                                         what the primary's gate-zero goes on to do

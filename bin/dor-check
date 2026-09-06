@@ -1368,7 +1368,15 @@ def suite_evidence_error(eval, slug, ci, review_role)
       when :conflicted then CiStatus.conflicted_remedy(ci)
       when :ci_less then CiStatus.ci_less_remedy(ci)
       when :unreadable
-        CiStatus.unreadable_remedy(CiStatus.repo_from_pr_url(@pr_url), cause: ci[:cause])
+        # DO NOT RE-PRINT THE CREDENTIAL REMEDY HERE. A deferral can never clear an
+        # unread CI (that needs a FULL cert, which a deferral is by definition not), so
+        # the CI gate's own :unreadable error is ALWAYS raised beside this one and it
+        # already carries the ~500-character token remedy in full. Printing it twice in
+        # a single verdict is precisely how a reader learns to skim the thing we most
+        # need them to read — the same call the fast-cert branch above makes for the
+        # same reason. Point at it instead, and say what is specific to a deferral.
+        "the CI gate's error beside this one carries the credential remedy — refresh the token and re-read, " \
+          "because a deferral has NO local run underneath it to fall back on while the check read is refused"
       else
         "no green CI could be read for this PR, and a deferral has no local run underneath it to fall " \
           "back on"

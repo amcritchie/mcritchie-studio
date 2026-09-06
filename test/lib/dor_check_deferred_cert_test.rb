@@ -267,6 +267,29 @@ class DorCheckDeferredCertTest < Minitest::Test
     end
   end
 
+  # A REFUSED CI READ (401/403) IS THE TOKEN, NOT A VERDICT — and the deferred refusal
+  # must NOT re-print the ~500-character credential remedy the CI gate's own error is
+  # already carrying beside it. A deferral can never clear an unread CI (that needs a
+  # FULL cert, which a deferral is by definition not), so the two errors ALWAYS appear
+  # together; printing the paragraph twice in one verdict is how a reader learns to skim
+  # the thing we most need them to read. Point at it, and say the deferral-specific part.
+  def test_an_unreadable_ci_points_at_the_credential_error_instead_of_repeating_it
+    with_desk do |projects, desk|
+      verdict, code = dor_check(task_json([receipt_for(desk)]), desk, projects, ci: "unreadable")
+
+      refute verdict["ready"], "a CI nobody could read is not a green one"
+      assert_equal 1, code
+      refusal = defer_refusal(verdict)
+      refute_nil refusal, "expected a deferral refusal: #{verdict['errors']}"
+      assert_includes refusal, "carries the credential remedy",
+                      "it must POINT at the remedy beside it"
+      assert_includes refusal, "NO local run underneath it",
+                      "and still say the part that is specific to a deferral"
+      refute_includes refusal, "gh-auth-refresh",
+                      "the remedy itself belongs to the CI error, printed once"
+    end
+  end
+
   # --- [unit] role independence ----------------------------------------------------
 
   # THE REVIEW GATE-ZERO GRADES IT THE SAME WAY, which is what keeps a deferred task
