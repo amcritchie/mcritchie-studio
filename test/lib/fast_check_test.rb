@@ -662,6 +662,44 @@ class FastCheckTest < Minitest::Test
     end
   end
 
+  # THE SCOPE, PINNED IN ONE TEST. The refusal this change relocates is a SATELLITE
+  # condition, not a cap condition, and nothing else in this file states that as a
+  # contrast. config/fast_cert_spine.yml has five entries and ALL FIVE exist only in
+  # the hub (measured 2026-09-06: turf-monster 0 of 5, rolio 0 of 5), so ONE capped
+  # diff splits two ways — and both halves were observed on real builds the same day:
+  #
+  #   HUB       51 paths over the cap → mapped lane skipped → THE SPINE STILL RAN →
+  #             certified green and accepted against a green CI. The cap cost
+  #             coverage, not the PR.
+  #   SATELLITE 29 paths over the cap → mapped lane skipped → spine resolves to
+  #             NOTHING → zero executed tests → the builder paid ~30 minutes of local
+  #             full suite before he could open a PR.
+  #
+  # Same diff, same cap, opposite outcomes — so a fix that changed the HUB half would
+  # be over-broad, and one that keyed on the cap instead of on the zero would change
+  # exactly the wrong half. This asserts both halves from one fixture.
+  def test_the_hub_shape_certifies_and_only_the_satellite_shape_defers
+    with_wide_mapping_repo do |dir, _|
+      hub_out, hub_code, hub_lines = run_check(dir, merge_stderr: true)
+
+      assert_equal 0, hub_code, "the HUB half: a capped lane over a LIVE spine still certifies:\n#{hub_out}"
+      assert_match(/fast cert green: 0 mapped \(CAPPED:/, hub_out)
+      refute_match(/DEFERRING/, hub_out, "the hub must not acquire a deferral it never needed")
+      assert_equal [["test/models/spine_core_test.rb"]], lane_calls(hub_lines, "TEST"),
+                   "and the spine is what makes it certifiable"
+    end
+
+    with_wide_mapping_repo do |dir, write|
+      write.call("spine.yml", "spine: []\n") # the satellite: none of the hub's spine resolves
+
+      sat_out, sat_code, sat_lines = run_check(dir, merge_stderr: true)
+
+      assert_equal 2, sat_code, "the SATELLITE half: the same cap over NO spine defers:\n#{sat_out}"
+      assert_match(/DEFERRING to GitHub CI/, sat_out)
+      assert_empty lane_calls(sat_lines, "TEST"), "nothing could run — that is the whole condition"
+    end
+  end
+
   # THE RECEIPT IS THE DEFERRAL, so it has to REACH THE BOARD — dor-check grades the
   # record, not the message. Recorded through the same `--checks` funnel the green path
   # uses (bin/task merges client-side against the board's current state, so the write

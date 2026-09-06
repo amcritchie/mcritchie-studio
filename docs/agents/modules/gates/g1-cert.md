@@ -226,9 +226,21 @@ impossible by construction rather than by every repo remembering to ignore `tmp/
    Why it moved at all: `bin/fast-check` runs at **ship step 2 of 8 — before the
    push, before the PR, before any CI exists**, so a refusal left the builder with
    no PR and one remedy — a local full suite MEASURED at ~30 minutes against CI's
-   ~9 for the identical command. A build paid that in full on 2026-09-06, and any
-   diff wide enough to trip the cap pays it (`app/services/solana/config.rb` trips
-   it at 26-29 paths routinely).
+   ~9 for the identical command. A build paid that in full on 2026-09-06.
+
+   **It is a SATELLITE condition, not a cap condition**, and the difference decides
+   which builds change. The spine's five entries **all exist only in the hub**
+   (measured 2026-09-06: turf-monster 0 of 5, rolio 0 of 5), so one capped diff
+   splits two ways — both observed the same day:
+
+   | | what happened | verdict |
+   |---|---|---|
+   | **Hub** (`release-offers-retired-cert`) | `bin/release.rb` mapped 50 files, **51 paths over the cap** → mapped lane skipped → **the spine still ran** | certified green, accepted against a green CI. The cap cost coverage, not the PR. **Unchanged by this.** |
+   | **Satellite** (`empty-solana-network-fails-open`, turf-monster) | 29 paths over the cap → mapped lane skipped → **spine resolves to nothing** | zero executed tests → REFUSED, and the builder paid the ~30 minutes. **This is what defers now.** |
+
+   So the population the deferral serves is the **six non-hub repos**. The guard
+   stays keyed on the ZERO and merely READS the cap: keyed on the cap it would have
+   changed the hub half, which needs nothing.
 
    On the REFUSE path nothing is recorded and no `g1_cert` attempt is stamped; it
    is a precondition on the SELECTION, the same shape as the root, desk, and

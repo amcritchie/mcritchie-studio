@@ -259,18 +259,33 @@ module FastCert
   # exists. So the refusal above, correct as a verdict, left the builder holding a diff with
   # NO PR and exactly one remedy: a local full suite, MEASURED at ~30 minutes against CI's ~9
   # for the identical command. That is the wall-clock the fast lane was built to avoid, and a
-  # build paid it in full on 2026-09-06. It is not a doc-only edge case either — any diff wide
-  # enough to trip the 15-path cap pays it, and app/services/solana/config.rb trips it at 26-29
-  # paths routinely.
+  # build paid it in full on 2026-09-06.
+  #
+  # AND IT IS A SATELLITE CONDITION, NOT A CAP CONDITION — which is why the split below keys
+  # on the ZERO and merely READS the cap, rather than keying on the cap itself.
+  # config/fast_cert_spine.yml has five entries and ALL FIVE exist only in the hub (measured
+  # 2026-09-06: turf-monster 0 of 5, rolio 0 of 5). So one capped diff splits two ways, both
+  # observed the same day:
+  #
+  #   HUB       release-offers-retired-cert — bin/release.rb mapped 50 files, 51 paths over
+  #             the cap → mapped lane skipped → THE SPINE STILL RAN → certified green and
+  #             accepted against a green CI. The cap cost coverage, not the PR. Untouched here.
+  #   SATELLITE empty-solana-network-fails-open (turf-monster) — 29 paths over the cap →
+  #             mapped lane skipped → spine resolves to NOTHING → zero executed tests →
+  #             REFUSED, and the builder paid the ~30 minutes.
+  #
+  # The population that needs the deferral is therefore the six non-hub repos, and a fix that
+  # moved the HUB half would be over-broad. Nothing below can reach a run that executed a test.
   #
   # THE TWO ZERO-EVIDENCE CASES ARE NOT THE SAME FACT, and separating them is the whole idea:
   #
-  #   CAPPED  → :defer. The diff DID map to real, relevant test files — MORE than the cap, not
-  #             fewer. Every one of them runs on CI, on this exact tree, in the run that was
-  #             going to happen anyway. Nothing about the evidence is missing; only the RUNNER
-  #             is wrong, and we chose that ourselves for a budget reason. So the cert defers:
-  #             it records a fingerprint-bound receipt saying no local lane could certify this
-  #             tree, and dor-check credits that receipt ONLY beside a GREEN CI.
+  #   CAPPED  → :defer. Reached only when the spine ALSO resolved to nothing, i.e. on a
+  #             satellite. The diff DID map to real, relevant test files — MORE than the cap,
+  #             not fewer. Every one of them runs on CI, on this exact tree, in the run that
+  #             was going to happen anyway. Nothing about the evidence is missing; only the
+  #             RUNNER is wrong, and we chose that ourselves for a budget reason. So the cert
+  #             defers: it records a fingerprint-bound receipt saying no local lane could
+  #             certify this tree, and dor-check credits that receipt ONLY beside a GREEN CI.
   #
   #   UNMAPPED → :refuse, unchanged and byte-identical. Here the diff maps to NOTHING: no
   #             convention target, no grep hit, no spine. That is a fact about the DIFF — the

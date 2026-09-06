@@ -9,8 +9,23 @@
 # 8 — before the push, before the PR, before any CI exists. So its (correct) refusal
 # of a diff it cannot certify left the builder with no PR, no CI, and one remedy: a
 # local full suite, MEASURED at ~30 minutes against CI's ~9 for the identical
-# command. A build paid that in full on 2026-09-06, and any diff wide enough to trip
-# the 15-path mapped cap pays it.
+# command. A build paid that in full on 2026-09-06.
+#
+# THE REPO IS turf-monster, AND THAT IS NOT DECORATION. The refusal is a SATELLITE
+# condition, not a cap condition, and the fixture has to be able to tell them apart.
+# config/fast_cert_spine.yml has five entries and ALL FIVE exist only in the hub
+# (measured 2026-09-06: turf-monster 0 of 5, rolio 0 of 5). So the same capped diff
+# splits two ways, and both halves were observed the same day:
+#
+#   HUB  (release-offers-retired-cert): 51 paths over the cap → mapped lane skipped →
+#        the SPINE still ran → certified green, accepted against a green CI. The cap
+#        cost coverage, not the PR. This path must not change, and does not.
+#   SATELLITE (empty-solana-network-fails-open, turf-monster): 29 paths over the cap →
+#        mapped lane skipped → spine resolves to NOTHING → zero executed tests →
+#        REFUSED, and the builder paid the ~30 minutes.
+#
+# So the condition being fixed is "this run will execute ZERO test files, and the only
+# reason is a cap we imposed" — which on today's spine means the six non-hub repos.
 #
 # The remedy is to let a CAPPED diff push, open its PR, and let a GREEN CI carry the
 # suite — so bin/fast-check now records a fingerprint-bound "[cert-deferred@<fp>]"
@@ -43,7 +58,10 @@ class DorCheckDeferredCertTest < Minitest::Test
   BIN = File.expand_path("../../bin/dor-check", __dir__)
   SLUG = "capped-cert-blocks-the-pr"
   BRANCH = "feat/#{SLUG}"
-  REPO = "mcritchie-studio"
+  # A SATELLITE, deliberately: the hub keeps a live spine under a cap and never reaches
+  # this route at all. Grading the deferral against a hub fixture would test the repo
+  # that does not need it.
+  REPO = "turf-monster"
 
   # What bin/fast-check writes as the receipt's detail. Shaped like the real one so a
   # reader of a failure here sees what the board actually carries.
