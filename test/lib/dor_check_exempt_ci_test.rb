@@ -760,10 +760,18 @@ class DorCheckExemptCiTest < Minitest::Test
   # NUMBERS, and the reason for each:
   #   bin/lib/ci_gate.rb  1 stating / 0 default — unread_ci_refusal forwards its own
   #                       cert_route:, and both CiGate.verdict callers state it.
-  #   bin/dor-check       1 stating / 2 default — the stating one is pr_read_alert,
-  #                       which FORWARDS its callers' route (see below); the two
-  #                       defaults are the suite-gate refusal and the submit-side
-  #                       note, both on the GATED path where a cert genuinely clears.
+  #   bin/dor-check       1 stating / 3 default — the stating one is pr_read_alert,
+  #                       which FORWARDS its callers' route (see below); the three
+  #                       defaults are the suite-gate refusal, the submit-side note,
+  #                       and the DEFERRED-cert refusal, all on the GATED path where a
+  #                       cert genuinely clears. The third is
+  #                       capped-cert-blocks-the-pr: a diff whose cert was deferred to
+  #                       CI has NO local run underneath it, but a FULL local cert is
+  #                       still exactly what would satisfy the gate here — it makes
+  #                       suite_eval[:ok] true and full_cert_stands_in_for_ci? then
+  #                       credits it against the unread CI — so the default's promise
+  #                       ("certify in full instead") is TRUE on that branch, and the
+  #                       branch's own text already names bin/full-suite-check.
   #   bin/pr-review       1 stating / 0 default — cert_route: !maybe_exempt.
   #   bin/release.rb      0 stating / 1 default — the G3 pre-QA gate, where the
   #                       local-cert route was retired. Known-wrong, pre-existing,
@@ -771,7 +779,7 @@ class DorCheckExemptCiTest < Minitest::Test
   #                       that fixing it (or adding a second) has to come back here.
   UNREADABLE_REMEDY_CALL_SITES = {
     "bin/lib/ci_gate.rb" => { states_route: 1, takes_default: 0 },
-    "bin/dor-check" => { states_route: 1, takes_default: 2 },
+    "bin/dor-check" => { states_route: 1, takes_default: 3 },
     "bin/pr-review" => { states_route: 1, takes_default: 0 },
     "bin/release.rb" => { states_route: 0, takes_default: 1 }
   }.freeze
