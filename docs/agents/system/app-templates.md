@@ -171,18 +171,20 @@ set is a different authority entirely: three individual wallets, which are the
 hub's own parked admin identities (Alex Bot `8K81w4e6…`, Alex `7ZDJp7FU…`, Mason
 `CytJS23p…`). Two different authorities, two different transactions.
 
-**Those signer addresses are the MAINNET set, and turf-vault does record them —
-just not where you would look first.** `turf-vault/docs/CURRENT_DEPLOYMENT.md` is
-the wrong citation: its signer rows sit only under `## Devnet`, and its
-`## Mainnet` table carries no signer row and no upgrade-authority row at all. The
-in-repo mainnet record is `turf-vault/scripts/squad.json` — a
-`"network": "mainnet-beta"` block whose `members` holds exactly these three and
-whose `_comment` names them in prose (*"Signer set: 8K81 Alex Bot (rotated), 7ZDJ
-Alex, Cyt Mason; threshold 2"*). `scripts/initialize-mainnet.js`, the script
-that puts a signer set on mainnet, builds `signers` from that record —
-`[members.alex_bot, members.alex, members.mason]`, passed to
-`.initialize(signers, threshold, treasuryAuth)` — so `squad.json` is a
-load-bearing record, not a note. Do **not** cite
+**Those signer addresses are the MAINNET set, and
+`turf-vault/docs/CURRENT_DEPLOYMENT.md` is where to read them.** Its
+`## Mainnet` table records the program ID, the Squads upgrade authority
+(`Bk9sS7ii…`), the 2-of-3 threshold and all three signer rows, beside the
+matching `## Devnet` table — so cite that file, and cite the cluster heading you
+mean. `turf-vault/scripts/squad.json` is provenance, not the citation: it was the
+in-repo mainnet record back when only the devnet table carried signers, and it
+stays load-bearing as an INPUT rather than as a record —
+`scripts/initialize-mainnet.js` builds `signers` from its `members`
+(`[members.alex_bot, members.alex, members.mason]`, passed to
+`.initialize(signers, threshold, treasuryAuth)`), and `scripts/squad-upgrade.js`
+takes its cluster from that file's top-level `network`/`programId`/`vaultPda`.
+Read `squad.json` to predict what a script will do; read `CURRENT_DEPLOYMENT.md`
+to learn what is deployed. Do **not** cite
 `turf-vault/docs/KEY_ROTATION.md` as an authority for any live signer fact — it
 opens *"HISTORICAL SUPERSEDED PLAN. DO NOT EXECUTE AS CURRENT PROCEDURE"* and
 points readers at `CURRENT_DEPLOYMENT.md` itself. (Describing what that plan
@@ -195,11 +197,13 @@ from the program source, which `initialize-mainnet.js` mirrors. Re-read
 2026-09-05: mainnet `GBu44HFJjq61WnS9UV1twcSrCC6SkuXHK8RM6tUKsWzV` (program
 `DaFv83yo…`) and devnet `J7b5g9uS5M2Nog1Ly1UATXTDMtXdpXK3JffRAHXGHkK2` (program
 `EQGFJAcA…`) both carry the same three signers at the same offsets, and
-`threshold = 2`. The sets matching exactly is why matching an address against a
-doc can never tell you which cluster you are on. Only the cluster-scoped heading,
-or a cluster-scoped chain read — `solana program show <PROGRAM_ID> --url
-<mainnet-beta|devnet>` for the upgrade authority, the `VaultState` PDA for the
-signer set — settles it.
+`threshold = 2`. That agreement is an observation, never a guarantee: each
+cluster's `VaultState` was written by its own `initialize`, and `update_signers`
+can move one without the other. The sets matching exactly is also why matching an
+address against a doc can never tell you which cluster you are on. Only the
+cluster-scoped heading, or a cluster-scoped chain read — `solana program show
+<PROGRAM_ID> --url <mainnet-beta|devnet>` for the upgrade authority, the
+`VaultState` PDA for the signer set — settles it.
 
 **So the console did have one unique property, and it was removed knowingly.**
 Not "coordinates a rotation" but **coordinating a 2-of-3 `update_signers` with no
