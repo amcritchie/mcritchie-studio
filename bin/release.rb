@@ -2570,10 +2570,17 @@ def pre_qa_ci_abort(repo, sha, ci)
       "(git revert -m 1 <merge-sha>; push), then re-run `bin/release prepare` — the sweep self-heals and the " \
       "REST of the RC rides on."
   when :unreadable
+    # `cert_route: :retired` — STATED, never defaulted. The default is `true`, which
+    # ends the shared remedy with "certify in full instead: bin/full-suite-check
+    # <task>": an offer this gate cannot honour, and a placeholder it cannot fill.
+    # Nothing in this file consults a local certification — ci_pass? (:green) is the
+    # only pass above, and the suite was DEMOTED at Phase 3 — so a full cert run on
+    # the operator's machine changes this verdict by exactly nothing, and G3 is
+    # RELEASE-grain, so there is no `<task>` to name either.
     "pre-QA gate FAILED for #{repo}: GitHub CI is UNREADABLE for #{short(sha)} (#{ci_detail(ci)}). CI is the G3 " \
       "verdict now and FAILS CLOSED — an :unreadable verdict is a credential/token fault, NOT a missing or still-" \
       "running CI, so the gate does NOT poll it (a refused token never heals mid-sweep). " \
-      "#{CiStatus.unreadable_remedy(repo_name_with_owner(repo), cause: ci[:cause])}"
+      "#{CiStatus.unreadable_remedy(repo_name_with_owner(repo), cause: ci[:cause], cert_route: :retired)}"
   else
     "pre-QA gate HELD for #{repo}: GitHub CI reached NO green verdict for #{short(sha)} (#{ci_detail(ci)}) before " \
       "the poll timed out. CI is the G3 verdict now and FAILS CLOSED on anything but green — a still-pending or " \
