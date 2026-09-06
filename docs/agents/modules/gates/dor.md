@@ -71,9 +71,19 @@ allowlist:
   tiers anyway).
 - **And in the REVIEW role it must be proven against the PR.** A failed PR
   file-list read — `unreadable` (the credential was refused) *or* `unverified`
-  (no `gh`, a 404, a transport error) — **refuses** the exemption there rather
-  than granting it off a local tree, however well rooted. Until 2026-09-05 only
-  the credential half was closed, and only in the diff resolver: `unverified`
+  (no `gh`, a 404, a transport error) — **refuses the VERDICT** there
+  (`ready: false`) rather than granting it off a local tree, however well
+  rooted. They refuse in two SHAPES, and only one keeps the exemption.
+  `unverified` still resolves a local diff, so the refusal forms on the exempt
+  path and **does not withdraw the exemption**: the payload keeps `exempt: true`
+  and `missing_tiers: []` beside `ready: false`. `exempt` names which guard was
+  WAIVED, never that the run passed, so the two fields are designed to disagree
+  there. `unreadable` is refused one step earlier, in the resolver
+  (`diff_source: "pr_unreadable"`, no files), so an ordinary review run never
+  reaches the exempt path at all and its payload reads `exempt: false` under the
+  same `ready: false`. Read `ready` for the verdict in both; there is no cleared
+  exemption flag to go looking for. Until 2026-09-05 only the credential half
+  was closed, and only in the diff resolver: `unverified`
   fell through to the working tree, and the exempt path had no role-split at all,
   so the alert landed as a *suggestion* and the review and builder verdicts came
   back byte-identical — `✓ … → ready to advance`, off `[source: git working
@@ -342,7 +352,25 @@ The exempt path was the last holdout: it printed the alert as a suggestion for
 Its refusal now also says *which* half refused — an unread PR is not the CI
 verdict, and a closing line that blames CI sends the reader to the wrong fix.
 
-The fix is one command: `eval "$(bin/gh-auth-refresh --export)"`, then re-run.
+**The fix depends on WHICH of the two failures you got, and the gate prints the
+right one — do not read one remedy for both.**
+
+- **`unreadable`** — GitHub refused the credential (401/403, a rate limit, a
+  missing `Checks: Read`). Here the fix is one command:
+  `eval "$(bin/gh-auth-refresh --export)"`, then re-run. This is the only branch
+  that reaches `CiStatus.unreadable_remedy`, and that remedy opens by saying so:
+  *"This is a CREDENTIAL fault or API limit, NOT a missing CI."*
+- **`unverified`** — everything else: no `gh` on `PATH`, a 404, a transport
+  error, a GitHub API outage, a body that would not parse. **There is no
+  credential to refresh**, so `gh-auth-refresh` fixes nothing. `bin/dor-check`
+  says exactly that instead — *"this is NOT a credential refusal, so the LOCAL
+  view was graded instead … Re-run once `gh` answers"* — and the re-run only
+  clears it once the read itself starts working.
+
+Prescribing the credential command for an `unverified` read is this family's
+signature defect wearing a doc's clothes: a gate naming a remedy it cannot
+honour. Both branches live in `pr_read_alert` (`bin/dor-check`), split on
+`pr_file_read[:state]`.
 
 `DOR_CHECK_DIFF_ROOT=<path>` bypasses the guard: that is the caller **declaring**
 a root (the CI/test seam), exactly as `FAST_CHECK_ROOT` / `FULL_SUITE_ROOT` do
@@ -474,9 +502,18 @@ attempt n+1.
     `ci.yml`'s verbatim command, `test:system` included. A **fast** cert is not
     enough, and a `[full-suite-bypass]` is a declared hatch rather than evidence,
     so neither clears it.
-  - **On the EXEMPT (doc-only) path there is NO escape — green, or nothing.** The
-    cert route does not merely fail there, it does not exist: the shape/test-tier
-    gate is already waived, so there is no suite whose result could stand in.
+  - **On the EXEMPT (doc-only) path there is NO escape, and green alone no
+    longer carries it.** A green CI is **necessary but not sufficient** here.
+    Until 2026-09-05 it was both, and "green, or nothing" was the whole rule;
+    since the PR-read refusal joined this path, a doc-only review can refuse on a
+    **GREEN** CI — because the PR's own file list went unread, so the exemption
+    was never proven against the artifact this gate judges. Two independent halves
+    can refuse, and the closing line names which one did (`this refusal is <the CI
+    verdict…> AND <the PR's own file list going unread…>`), so a reader is never
+    sent to CI for a fault CI did not have. What has not changed is the escape:
+    the cert route does not merely fail there, it does not exist — the
+    shape/test-tier gate is already waived, so there is no suite whose result
+    could stand in.
     Accepting a cert would leave the merge with zero verification from either
     side, which is the state the gate exists to refuse.
     **The refusal now says that** (`cert_route: false`, `bin/lib/ci_gate.rb`).

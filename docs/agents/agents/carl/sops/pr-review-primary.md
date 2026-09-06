@@ -126,20 +126,33 @@ so its CI was green at claim time. If any of that is missing, note it as a findi
      This is why the refusal names that command: the gate honours the remedy it
      prints.
 
-     **On a DOC-ONLY PR there is no escape at all — green, or nothing.** When the
-     task's kind is `docs` / `chore` / `cleanup` *and* the observed diff ships no
-     behavior, the gate takes its **exempt** path: the shape/test-tier gate is
-     waived, and because it is waived there is no suite left whose result could
-     stand in for the CI verdict. So a full cert changes nothing there, and **the
-     refusal no longer offers one** — it says plainly that a local cert does not
-     stand in, and that green is the only thing that advances it. Do not send the
-     builder to `bin/full-suite-check` on a doc-only refusal; it is a wasted run.
+     **On a DOC-ONLY PR there is no escape at all, and green is NECESSARY but
+     not SUFFICIENT.** When the task's kind is `docs` / `chore` / `cleanup` *and*
+     the observed diff ships no behavior, the gate takes its **exempt** path: the
+     shape/test-tier gate is waived, and because it is waived there is no suite
+     left whose result could stand in for the CI verdict. So a full cert changes
+     nothing there, and **the refusal no longer offers one** — it says plainly
+     that a local cert does not stand in. Do not send the builder to
+     `bin/full-suite-check` on a doc-only refusal; it is a wasted run.
+
      Until 2026-09-05 this SOP promised the opposite, and so did the gate: it
      printed the code-path remedy and then refused the exact cert it had just
      named (`/tasks/exempt-refusal-prints-dead-remedy`). What to do instead is
      unchanged from any other unread verdict — **defer** while checks are coming,
      and `conductor-review` when the cause is a credential the builder does not
      own.
+
+     **Expect a refusal that a GREEN CI does not clear.** This SOP used to say
+     green was the only thing that advances the exempt path, which read as though
+     green were enough. It is not, since the PR-read refusal joined this path:
+     a **failed read of the PR's own file list** — `unreadable` (the credential
+     was refused) or `unverified` (no `gh`, a 404, a transport error) — refuses
+     the review verdict on its own, on a CI that is fully green. The exemption
+     was never proven against the artifact the gate judges, and a local tree is
+     not allowed to stand in for it in this role. The refusal's closing line
+     names which half refused, so read it before routing: a CI fault and an
+     unread PR take different fixes, and only the credential half is cleared by
+     `eval "$(bin/gh-auth-refresh --export)"`.
 
      **In a GEM repo the escape is the same command with a different source.**
      `studio-engine` and `solana-studio` have no `ci.yml` for the resolver to read

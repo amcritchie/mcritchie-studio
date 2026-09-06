@@ -428,13 +428,18 @@ Supported fields:
 | `acceptance` | Acceptance criteria, one item per line |
 | `test_plan` | Checks the feature agent expects to run, one item per line |
 | `checks_run` | Checks actually completed before the current handoff, one item per line |
-| `post_deploy_cmd` | Command `bin/release` runs **verbatim against the deployed app** (QA on `prepare`, prod on `ship`) after migrations, so a seed/backfill isn't run by hand. Must be **narrow, prod-safe, and idempotent** — **never a bare `db:seed`** (see safety rule below). Set to `none` to acknowledge a schema-only migration that needs no command. Two members declaring the same work run **once**: the plan folds the interchangeable `rake` and `bin/rails` spellings and stamps the `[post-deploy]` check on both. |
+| `post_deploy_cmd` | Command `bin/release` runs **verbatim against the deployed app** (QA on `prepare`, prod on `ship`) after migrations, so a seed/backfill isn't run by hand. Must be **narrow, prod-safe, and idempotent** — **never a bare `db:seed`** (see safety rule below). Set to `none` to acknowledge a schema-only migration that needs no command. Two members declaring the same work **on the same app** run **once**: the plan folds the interchangeable runner spellings (`bundle exec` / `bin/` / `./` / `rails` / `rake`) and stamps the `[post-deploy]` check on both. **That prefix is the only thing normalised** — everything after the runner is compared **verbatim**, case and whitespace included, so a command differing by one space inside a quoted argument does NOT fold and runs twice. The bias is deliberate: a false split repeats idempotent work (merely slow), while a false merge silently skips declared work and still stamps that member's check green. |
 
-**The command's EXIT STATUS is its verdict.** `bin/release` runs it under
-`heroku run --exit-code` and reads nothing else — not its output. A command that
-prints its own failure and exits 0 records the hook **GREEN** and the release
-ships past it. So a command that can partially fail must compare what it did
-against what it should have done and exit non-zero on the shortfall.
+**The command's EXIT STATUS is its verdict — and the only thing that is.**
+`bin/release` runs it under `heroku run --exit-code` and decides pass/fail on
+that status alone. The output is **read but never judged**: the captured stdout
+is echoed into the release log (`print(out)`), and `parse_test_counts` scans it
+so the telemetry line can carry a `12 runs, 0 failures` summary — a read wrapped
+in a `rescue` exactly so telemetry can never change a release's outcome. Nothing
+the command PRINTS can pass or fail it. A command that prints its own failure
+and exits 0 records the hook **GREEN** and the release ships past it. So a
+command that can partially fail must compare what it did against what it should
+have done and exit non-zero on the shortfall.
 `tasks:backfill_testing_phases` and `releases:refresh_duration_metrics` are the
 worked examples — and they pick DIFFERENT skip allowances on purpose. The
 backfill walks every task, so it tolerates a few isolated poisoned rows
@@ -443,6 +448,28 @@ flat allowance would swallow the whole population, so it tolerates none by
 default (`REFRESH_MAX_SKIPPED`). Size the allowance to the POPULATION, and
 measure against what the command actually selected rather than against its
 ceiling.
+
+**`BACKFILL_MAX_SKIPPED` — the backfill's escape hatch, and the three things it
+cannot do.** `tasks:backfill_testing_phases` tolerates **5** individually-skipped
+tasks by default (`Task::TestingPhases::BACKFILL_SKIP_ALLOWANCE`) and aborts the
+release past that. Raise it for a known-bad row by setting
+`BACKFILL_MAX_SKIPPED=<n>` on the `heroku run`. Zero would be stricter and is the
+wrong trade — this hook runs AFTER the code is live, so an abort leaves a
+half-shipped release for a human to unwind, and one genuinely poisoned event
+history must not wedge every future release. It stays an escape hatch, not a
+switch, and it cannot be widened into one:
+
+| It cannot… | Because |
+|------------|---------|
+| **…be disarmed by a garbled value** | Only a bare digit string is honoured (`/\A\d+\z/`). `lots`, `5x`, `-1`, and an empty string all fall back to the **default of 5** — never to "unbounded". A typo in a deploy env var must not be the thing that lets a broken backfill ship. |
+| **…authorise skipping half the board** | The allowance in force is `min(requested, ceiling)` where `ceiling = max(5, attempted / 2)`. On a board of ten rows or more that ceiling **is** half, so no override gets past it — a run that skipped half is systematic by definition, which is the condition the guard exists to catch. The floor at the default means the ceiling can only ever LOWER an override, never tighten the un-overridden guard: a 6-row board still tolerates its 5 poisoned rows. When a value is cut down the abort says so (`BACKFILL_MAX_SKIPPED=999999 capped to 10`), so the number you read is one you can account for against the value you set. |
+| **…rescue a total no-op** | `attempted > 0` with `refreshed == 0` aborts **before** the allowance is consulted at all (`BackfillResult#no_op?`). No value of this variable reaches that check. |
+
+The last two exist because both failures actually shipped: `BACKFILL_MAX_SKIPPED=999999`
+once let 19 of 20 tasks fail, exit 0, and stamp the `[post-deploy]` check GREEN
+over a board that had almost entirely failed to rewrite; and before `no_op?`, a
+run where every single refresh raised printed `0`, exited 0, and satisfied
+`heroku run --exit-code` just the same.
 
 **`post_deploy_cmd` safety rule.** Because `bin/release` runs the command
 verbatim against PRODUCTION, `bin/dor-check` **rejects** a bare full-suite seed
