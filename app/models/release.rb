@@ -533,7 +533,7 @@ class Release < ApplicationRecord
     proven = stamp == "shipped" ? ship_evidence_repos : qa_evidence_repos
     Array(members).select do |task|
       repos = task.release_repos
-      exempt = repos.select { |repo| Release::Repos.gem?(repo) }
+      exempt = repos.select { |repo| evidence_exempt?(repo, stamp: stamp) }
       next false unless Release::MemberEvidence.hold?(repos: repos, proven: proven, exempt: exempt)
 
       Rails.logger.warn(
@@ -543,6 +543,31 @@ class Release < ApplicationRecord
       )
       true
     end
+  end
+
+  # Does THIS stamp's evidence requirement not apply to this repo? Two sources,
+  # and the difference between them is the point:
+  #
+  #   * a GEM is exempt at BOTH stamps. It publishes rather than deploys, so it
+  #     carries neither a QA sha nor an ff'd `main`. Unchanged.
+  #   * a repo DECLARING `qa_evidence: exempt` is exempt at the QA stamp ONLY.
+  #
+  # The QA-only scope is deliberate and load-bearing. turf-vault (the one repo
+  # that declares it today) genuinely cannot produce QA evidence — no dyno, no
+  # URL, both QA steps skip it by design — but it absolutely DOES produce SHIP
+  # evidence: `bin/release ship` fast-forwards its `release → main` and records
+  # the sha at the push chokepoint whether or not a deploy adapter fires. So its
+  # `shipped` stamp is backed by a real record, and honouring the exemption there
+  # would disarm a guard that currently works correctly on this exact repo.
+  #
+  # Note what this does NOT do: it never infers an exemption from missing config.
+  # A repo with no qa_test_cmd and no QA environment that has not DECLARED itself
+  # exempt is still held — which is what keeps the guard armed for a Rails app
+  # whose QA env was merely forgotten.
+  def evidence_exempt?(repo, stamp:)
+    return true if Release::Repos.gem?(repo)
+
+    stamp != "shipped" && Release::Repos.qa_evidence_exempt?(repo)
   end
 
   def evidence_keys(key)

@@ -262,6 +262,95 @@ class Release::ReposTest < ActiveSupport::TestCase
     assert_includes Release::Repos.three_rung_repos, "turf-vault"
   end
 
+  # --- QA-evidence policy: DECLARED, never inferred ----------------------------
+
+  test "[unit] turf-vault DECLARES itself exempt from QA evidence" do
+    assert Release::Repos.qa_evidence_exempt?("turf-vault"),
+           "an Anchor program has no dyno, no URL and no deploy — the pre-QA gate and the QA deploy " \
+           "loop both skip it BY DESIGN, so a candidate records zero QA evidence for it and every " \
+           "member naming it was held at `reviewed` forever (rel-20260905-d6c266, rel-20260906-90c443)"
+    assert_equal Release::Repos::QA_EVIDENCE_EXEMPT, Release::Repos.qa_evidence("turf-vault")
+  end
+
+  test "[unit] a deployable app is NOT exempt just because someone forgot its QA env" do
+    # THE FENCE. The cheap repair for the turf-vault hold — "ignore any repo with
+    # no QA config" — would disarm the guard for every repo. Absence must never
+    # grant the exemption; only a declaration does.
+    %w[mcritchie-studio turf-monster mcritchie-industries].each do |repo|
+      assert_not Release::Repos.qa_evidence_exempt?(repo),
+                 "#{repo} deploys to a real QA app — its missing evidence must still hold a member"
+      assert_equal Release::Repos::QA_EVIDENCE_REQUIRED, Release::Repos.qa_evidence(repo)
+    end
+  end
+
+  test "[unit] tax-studio and chain-ops are NOT exempt though they too have no QA env" do
+    # Both are apps with no qa_test_cmd and no qa_environments entry — the exact
+    # config shape turf-vault has. They are NOT exempt, which is the proof that the
+    # exemption is read from the declaration rather than inferred from the tree.
+    # (Neither can ride a sweep today — tax-studio is `planned`, chain-ops
+    # `blocked`, and Ladder.sweepable is three-rung only — so declaring them would
+    # be an unmeasured guess. Each owes its own judgement the day it goes live.)
+    assert_not Release::Repos.qa_evidence_exempt?("tax-studio")
+    assert_not Release::Repos.qa_evidence_exempt?("chain-ops")
+  end
+
+  test "[unit] an unregistered repo defaults to REQUIRED, not exempt" do
+    assert_not Release::Repos.qa_evidence_exempt?("moms-app"),
+               "a repo the registry has never heard of must fail CLOSED"
+    assert_equal Release::Repos::QA_EVIDENCE_REQUIRED, Release::Repos.qa_evidence("moms-app")
+  end
+
+  test "[unit] an unrecognised qa_evidence value fails CLOSED to required" do
+    # A typo (`exmept`) must hold the member — visible and recoverable — rather
+    # than silently release it. The declared-values guard below catches the typo
+    # at its source; this is what happens in the window before someone does.
+    Release::Repos.stub(:meta, ->(_repo) { { "qa_evidence" => "exmept" } }) do
+      assert_equal Release::Repos::QA_EVIDENCE_REQUIRED, Release::Repos.qa_evidence("turf-vault")
+      assert_not Release::Repos.qa_evidence_exempt?("turf-vault")
+    end
+  end
+
+  test "[unit] every declared qa_evidence value is one the reader recognises" do
+    config = Release::Repos.config
+    declared = (config.fetch("gems", {}).to_a + config.fetch("apps", {}).to_a).filter_map do |repo, meta|
+      value = meta.is_a?(Hash) ? meta["qa_evidence"] : nil
+      [ repo, value ] if value.present?
+    end
+
+    declared.each do |repo, value|
+      assert_includes Release::Repos::QA_EVIDENCE_VALUES, value,
+                      "#{repo} declares qa_evidence: #{value.inspect}, which the reader does not " \
+                      "recognise — it would fail closed and hold every member naming #{repo}"
+    end
+  end
+
+  # THE DECLARATION IS CHECKED, NOT TRUSTED — the same shape as "a planned repo
+  # has not quietly been created". An exemption is only honest while the repo
+  # genuinely cannot produce QA evidence. The day one gains a gate command or a QA
+  # environment, this goes red and the declaration must come out so the guard
+  # re-arms, instead of the exemption quietly outliving its reason.
+  test "[unit] a QA-evidence-exempt repo really has no QA target to be evidenced by" do
+    qa_envs = YAML.load_file(Rails.root.join("config/qa_environments.yml"))
+                  .fetch("qa_environments", {}).keys
+
+    Release::Repos.qa_evidence_exempt_repos.each do |repo|
+      assert_nil Release::Repos.qa_test_cmd(repo),
+                 "#{repo} is declared QA-evidence exempt but registers a qa_test_cmd — the pre-QA " \
+                 "gate WOULD record a verdict for it, so the exemption is stale and must be removed"
+      assert_not_includes qa_envs, repo,
+                          "#{repo} is declared QA-evidence exempt but now has a qa_environments.yml " \
+                          "entry — it can be QA-deployed, so it must earn its evidence like any app"
+    end
+  end
+
+  # Guards the guard: every assertion above would pass vacuously over an empty list.
+  test "[unit] the QA-evidence exemption guard actually has a repo to check" do
+    assert_includes Release::Repos.qa_evidence_exempt_repos, "turf-vault"
+    assert_equal 1, Release::Repos.qa_evidence_exempt_repos.length,
+                 "exactly one repo is declared exempt today — a second one arriving unreviewed " \
+                 "is what this count is here to surface"
+  end
+
   test "prod_deploy is nil for a gem or an unknown repo" do
     assert_nil Release::Repos.prod_deploy("studio-engine")
     assert_nil Release::Repos.prod_deploy("not-a-real-repo")

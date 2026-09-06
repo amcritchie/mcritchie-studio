@@ -412,6 +412,169 @@ class Release::MultiRepoMemberTest < ActiveSupport::TestCase
     assert_equal [ TURF ], task.repos_missing_pr_url
   end
 
+  # --- THE EFFECT: a DECLARED QA-evidence exemption, and the fence around it ----
+  #
+  # turf-vault is an Anchor program. The pre-QA gate skips it (no qa_test_cmd →
+  # "self-gates") and the QA deploy loop skips it (absent from qa_environments.yml
+  # → "no QA environment registered"), and BOTH skip before writing any evidence —
+  # so a candidate carrying turf-vault recorded nothing for it and every member
+  # naming it was held at `reviewed` permanently. Re-running never cleared it:
+  # no run can produce evidence for a step that is skipped by design.
+  # rel-20260905-d6c266 held sharpen-update-signers-recipe and
+  # document-signer-rotation-path; rel-20260906-90c443 held
+  # qualify-vault-authority-by-cluster.
+  #
+  # The registry now DECLARES `qa_evidence: exempt` and the guard reads the
+  # declaration. These tests drive the EFFECT — the member's STAGE — and, just as
+  # importantly, they drive the NEGATIVE: an exemption that leaked into a repo
+  # which merely LOOKS unconfigured would be a worse defect than the hold it fixes.
+
+  VAULT    = "turf-vault"
+  VAULT_PR = "https://github.com/McRitchie-Studio/turf-vault/pull/8"
+  # A registered app sharing turf-vault's config shape (no qa_test_cmd, no QA env)
+  # but carrying NO exemption declaration — the control for the fence below.
+  TWIN     = "tax-studio"
+  TWIN_PR  = "https://github.com/McRitchie-Studio/tax-studio/pull/1"
+
+  # The single-repo shape: sharpen-update-signers-recipe, a docs/recipe change
+  # landing only in the Anchor repo.
+  def vault_only_task(label = "update signers recipe")
+    Task.create!(title: "sharpen #{label}", stage: "reviewed",
+                 metadata: { "devops" => { "shape" => "backend", "repositories" => [ VAULT ],
+                                           "pr_url" => VAULT_PR } })
+  end
+
+  # The spanning shape: qualify-vault-authority-by-cluster, which named turf-vault
+  # AND turf-monster.
+  def vault_and_turf_task
+    Task.create!(title: "qualify vault authority by cluster", stage: "reviewed",
+                 metadata: { "devops" => {
+                   "shape" => "backend",
+                   "repositories" => [ TURF, VAULT ],
+                   "pr_url" => TURF_PR,
+                   "pr_urls" => { TURF => TURF_PR, VAULT => VAULT_PR }
+                 } })
+  end
+
+  test "[integration] a turf-vault-only member assembles though the candidate QA'd nothing for it" do
+    task = vault_only_task
+    neighbour = single_repo_task
+    release = Release::Conductor.sweep!(task)
+    Release::Conductor.sweep!(neighbour)
+    # The real candidate's shape: the hub deployed to QA, turf-vault CANNOT.
+    qa_landed(release.reload, HUB)
+
+    Release::Conductor.qa_green!(release.reload)
+
+    assert_equal "assembled", task.reload.stage,
+                 "turf-vault produces no QA evidence BY DESIGN — holding it made the board read " \
+                 "wrong for the whole QA window with no run able to clear it"
+    assert_equal "assembled", neighbour.reload.stage, "and its neighbours are unaffected"
+  end
+
+  test "[integration] a member spanning turf-vault assembles once its DEPLOYABLE repo lands" do
+    task = vault_and_turf_task
+    release = Release::Conductor.sweep!(task)
+    qa_landed(release, TURF) # turf QA'd; turf-vault cannot be, and is exempt
+
+    Release::Conductor.qa_green!(release.reload)
+
+    assert_equal "assembled", task.reload.stage
+  end
+
+  # THE FENCE, part 1 — PRECISION. The exemption must drop turf-vault and nothing
+  # else. Same member, same run, but the repo that CAN be QA'd wasn't.
+  test "[integration] the exemption drops turf-vault ALONE — an unevidenced sibling still holds" do
+    task = vault_and_turf_task
+    release = Release::Conductor.sweep!(task)
+    qa_landed(release, HUB) # neither TURF nor VAULT landed; only VAULT is exempt
+
+    Release::Conductor.qa_green!(release.reload)
+
+    assert_equal "reviewed", task.reload.stage,
+                 "turf-monster is a deployable Rails app with a registered QA env — its missing " \
+                 "evidence must still hold the member, exactly as it did before"
+    assert_equal Task::MERGED_RELEASE, task.merged, "and it stays swept for the next self-healing run"
+  end
+
+  # THE FENCE, part 2 — MUTATION. Remove the DECLARATION and nothing else. If the
+  # member still assembles, the fix was a loosened guard rather than a declared
+  # fact, and the 2026-08-13 silent-stamp class is reopened for every repo.
+  test "[integration] MUTATION: strip the declaration and the same member is HELD again" do
+    task = vault_only_task
+    release = Release::Conductor.sweep!(task)
+    qa_landed(release, HUB)
+
+    Release::Repos.stub(:qa_evidence_exempt?, ->(_repo) { false }) do
+      Release::Conductor.qa_green!(release.reload)
+    end
+
+    assert_equal "reviewed", task.reload.stage,
+                 "the assemble in the tests above must be CAUSED by the registry declaration. " \
+                 "If this passes without it, the guard was disarmed for every repo."
+  end
+
+  # THE FENCE, part 3 — THE TWIN. tax-studio has the SAME config shape that used to
+  # be read as "exempt": no qa_test_cmd, and no config/qa_environments.yml entry.
+  # The only thing separating it from turf-vault is that turf-vault DECLARES the
+  # exemption and tax-studio does not. So this member must still be held — and it
+  # catches every inference-flavoured repair (keying off a blank qa_test_cmd, or off
+  # a missing QA environment) WITHOUT stubbing anything, unlike the mutation above.
+  test "[integration] a repo with turf-vault's exact config but NO declaration is still held" do
+    task = Task.create!(title: "tax studio twin", stage: "reviewed",
+                        metadata: { "devops" => { "shape" => "backend",
+                                                  "repositories" => [ TWIN ],
+                                                  "pr_url" => TWIN_PR } })
+    release = Release::Conductor.sweep!(task)
+    qa_landed(release.reload, HUB)
+
+    Release::Conductor.qa_green!(release.reload)
+
+    assert_equal "reviewed", task.reload.stage,
+                 "#{TWIN} registers no qa_test_cmd and has no QA environment — exactly like " \
+                 "turf-vault — but it never DECLARED an exemption, so the guard must still hold it. " \
+                 "If this assembles, the exemption is being inferred from missing config."
+  end
+
+  # THE FENCE, part 4 — SCOPE. The QA exemption must not reach the `shipped` stamp.
+  # `bin/release ship` genuinely fast-forwards turf-vault's release → main and
+  # records the sha at the push chokepoint (bin/release.rb:4314) whether or not a
+  # deploy adapter fires — so ship evidence for this repo is REAL, and honouring
+  # the exemption there would disarm a guard that currently works.
+  test "[integration] the QA exemption does NOT extend to `shipped` — main must really move" do
+    task = vault_and_turf_task
+    release = Release::Conductor.sweep!(task)
+    qa_landed(release, TURF)
+    Release::Conductor.qa_green!(release.reload)
+    assert_equal "assembled", task.reload.stage
+
+    shipped_landed(release.reload, TURF) # turf's main moved; turf-vault's did not
+    Release::Conductor.ship!(release: release.reload, deployed_sha: "deadbeef")
+
+    task.reload
+    assert_equal "assembled", task.stage,
+                 "turf-vault's main really does get ff'd — a member must not claim `shipped` " \
+                 "on a run that never advanced it"
+    refute_equal Task::MERGED_MAIN, task.merged
+  end
+
+  test "[integration] the same member ships once turf-vault's main actually lands" do
+    task = vault_and_turf_task
+    release = Release::Conductor.sweep!(task)
+    qa_landed(release, TURF)
+    Release::Conductor.qa_green!(release.reload)
+    shipped_landed(release.reload, TURF)
+    Release::Conductor.ship!(release: release.reload, deployed_sha: "deadbeef")
+    assert_equal "assembled", task.reload.stage
+
+    shipped_landed(release.reload, VAULT) # the ff the conductor records at the push
+    Release::Conductor.ship!(release: release.reload, deployed_sha: "deadbeef")
+
+    task.reload
+    assert_equal "shipped", task.stage
+    assert_equal Task::MERGED_MAIN, task.merged
+  end
+
   # ONE RULE, TWO CALLERS. The CLI screens with Release::SweepPlan.repo_coverage_gap
   # before it promotes; the conductor backstops with Task#repos_missing_pr_url at the
   # record. They must be the same verdict — two spellings is how a screen and its
