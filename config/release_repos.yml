@@ -386,6 +386,52 @@ apps:
     # the same path tax-studio and chain-ops take. An Anchor program has no dyno
     # to boot and no /up to smoke.
     #
+    # ⛔ AND THEREFORE — DECLARED QA-EVIDENCE EXEMPT. Read this before deleting it.
+    #
+    # The two skips above are REAL, and until 2026-09-06 they were also SILENT:
+    # the pre-QA gate wrote no metadata["qa_gates"] entry for this repo and the QA
+    # deploy loop `next`s before `qa_shas[repo] = sha`, so a candidate carrying
+    # turf-vault recorded ZERO QA evidence for it. Release#unproven_members then
+    # held every member naming turf-vault at `reviewed` forever —
+    # rel-20260905-d6c266 held sharpen-update-signers-recipe and
+    # document-signer-rotation-path; rel-20260906-90c443 held
+    # qualify-vault-authority-by-cluster. Re-running the sweep never cleared it,
+    # because the cause was structural: no run can produce evidence for a step
+    # that is skipped by design.
+    #
+    # THE FIX IS THIS KEY, NOT A LOOSER GUARD. The tempting repair — teach the
+    # guard to ignore any repo with no QA config — would disarm it for EVERY repo,
+    # including a Rails app whose QA env someone simply forgot to register. That
+    # is a far worse defect than the one it closes: the guard exists because on
+    # 2026-08-13 a member was stamped `assembled` for a repo the candidate never
+    # touched. So the exemption is DECLARED here, per repo, and the guard reads
+    # the declaration. Absent this key a repo is `required` — fail-closed, held.
+    #
+    # WHY EXEMPT RATHER THAN "OWES OTHER EVIDENCE": QA evidence answers one
+    # question — did this candidate's code get DEPLOYED somewhere a human can
+    # review it before production? For an Anchor program the honest answer is that
+    # the question does not apply: there is no dyno, no URL, and no deploy of any
+    # kind (the program is upgraded by hand through a Squads 2-of-3 multisig).
+    # This repo's `cargo check` / `clippy` / doc-op lanes DO run — on every push
+    # to accepted, release and main — but they are CI, and the sweep already reads
+    # them at the accepted rung through Release::AcceptedCertification (see SUITE
+    # CERTIFICATION below). Re-badging that CI as "QA evidence" would not add a
+    # check; it would only make an unreviewable repo LOOK reviewed.
+    #
+    # SCOPE — QA ONLY. This key does NOT exempt turf-vault from SHIP evidence, and
+    # must not be widened to. `bin/release ship` really does fast-forward this
+    # repo's `release → main`, and records the sha at the push chokepoint
+    # (bin/release.rb:4314) whether or not a deploy adapter fires. So
+    # metadata["shipped_shas"] carries a truthful turf-vault entry, the `shipped`
+    # stamp is backed by real evidence, and exempting it there would disarm a
+    # guard that currently works.
+    #
+    # THE DECLARATION IS CHECKED, NOT TRUSTED (repos_test.rb), the same way
+    # `ladder: planned` expires: a repo declared exempt must have NO qa_test_cmd
+    # and NO qa_environments.yml entry. The day turf-vault gains either, that test
+    # goes red and this key must come out so the guard re-arms.
+    qa_evidence: exempt
+    #
     # SUITE CERTIFICATION WORKS AS-IS. Release::AcceptedCertification resolves a
     # non-gem repo to DEFAULT_SUITE_WORKFLOW ("CI"), and this repo's
     # .github/workflows/ci.yml declares `name: CI` on push to

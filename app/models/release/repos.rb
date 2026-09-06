@@ -127,6 +127,51 @@ class Release
       app_meta(repo)&.dig("qa_deploy", "app") || repo.to_s
     end
 
+    # --- QA evidence: may a member be stamped `assembled` for this repo? --------
+    #
+    # Release#unproven_members refuses to stamp a member for a repo this candidate
+    # landed no QA record for. That guard is right — it exists because 2026-08-13
+    # stamped a security patch `assembled` for a repo the candidate never touched.
+    # But a repo can be structurally INCAPABLE of producing that record: turf-vault
+    # is an Anchor program with no dyno, no URL and no deploy of any kind, so the
+    # pre-QA gate and the QA deploy loop both skip it BY DESIGN and every member
+    # naming it was held at `reviewed` forever.
+    #
+    # The distinction the guard could not previously make is DECLARED vs INFERRED.
+    # Inferring the exemption from missing config ("no qa_test_cmd, so never mind")
+    # would disarm the guard for every repo, including a Rails app whose QA env was
+    # simply forgotten — the exact silent-stamp failure it was built to stop. So
+    # the registry STATES it, per repo, and this reads the statement.
+    #
+    # Fail-closed: absent or unrecognised, a repo is `required`. A typo'd value
+    # therefore holds the member (visible, recoverable) instead of releasing it,
+    # and repos_test.rb asserts every declared value is one of QA_EVIDENCE_VALUES
+    # so the typo is caught at the source rather than lived with.
+    QA_EVIDENCE_REQUIRED = "required"
+    QA_EVIDENCE_EXEMPT   = "exempt"
+    QA_EVIDENCE_VALUES   = [ QA_EVIDENCE_REQUIRED, QA_EVIDENCE_EXEMPT ].freeze
+
+    # The repo's declared QA-evidence policy. Defaults to `required` for every
+    # repo that says nothing — including repos outside the registry entirely.
+    def qa_evidence(repo)
+      declared = meta(repo)&.dig("qa_evidence").to_s.strip
+      QA_EVIDENCE_VALUES.include?(declared) ? declared : QA_EVIDENCE_REQUIRED
+    end
+
+    # Is this repo DECLARED exempt from producing QA evidence? Never infers: a
+    # repo with no QA environment and no gate command is still `required` unless
+    # it says otherwise in config/release_repos.yml.
+    def qa_evidence_exempt?(repo)
+      qa_evidence(repo) == QA_EVIDENCE_EXEMPT
+    end
+
+    # Every repo carrying the declaration — the list repos_test.rb walks to assert
+    # each one is honest (no qa_test_cmd, no qa_environments entry), so a repo that
+    # later gains a real QA target cannot keep a stale exemption.
+    def qa_evidence_exempt_repos
+      (gem_repos + app_repos).select { |repo| qa_evidence_exempt?(repo) }
+    end
+
     # The sibling checkout path for a repo — gem repos live next to this app at
     # the projects root, so resolve relative to the app root's parent.
     def repo_path(repo)
