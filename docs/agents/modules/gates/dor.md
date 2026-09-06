@@ -73,10 +73,15 @@ allowlist:
   file-list read — `unreadable` (the credential was refused) *or* `unverified`
   (no `gh`, a 404, a transport error) — **refuses the VERDICT** there
   (`ready: false`) rather than granting it off a local tree, however well
-  rooted. **It does not withdraw the exemption**, and the payload says so: it
-  still carries `exempt: true` and `missing_tiers: []`. `exempt` names which
-  guard was WAIVED, never that the run passed, so the two fields are designed to
-  disagree exactly here. Read `ready` for the verdict; there is no cleared
+  rooted. They refuse in two SHAPES, and only one keeps the exemption.
+  `unverified` still resolves a local diff, so the refusal forms on the exempt
+  path and **does not withdraw the exemption**: the payload keeps `exempt: true`
+  and `missing_tiers: []` beside `ready: false`. `exempt` names which guard was
+  WAIVED, never that the run passed, so the two fields are designed to disagree
+  there. `unreadable` is refused one step earlier, in the resolver
+  (`diff_source: "pr_unreadable"`, no files), so an ordinary review run never
+  reaches the exempt path at all and its payload reads `exempt: false` under the
+  same `ready: false`. Read `ready` for the verdict in both; there is no cleared
   exemption flag to go looking for. Until 2026-09-05 only the credential half
   was closed, and only in the diff resolver: `unverified`
   fell through to the working tree, and the exempt path had no role-split at all,
