@@ -752,6 +752,11 @@ class DorCheckExemptCiTest < Minitest::Test
   # add a caller, delete one, or flip one between "states its route" and "takes the
   # default", and this fails and hands the author the comment to update.
   #
+  # THE HASH IS KEYED BY FILE PATH, so on its own it can only ever audit the files
+  # someone thought to type. The FILE SET is therefore globbed and asserted
+  # separately — see `bin_files` and the set test below, which is what makes "add a
+  # caller" true of a caller added in a FILE THIS HASH HAS NEVER HEARD OF.
+  #
   # NUMBERS, and the reason for each:
   #   bin/lib/ci_gate.rb  1 stating / 0 default — unread_ci_refusal forwards its own
   #                       cert_route:, and both CiGate.verdict callers state it.
@@ -782,6 +787,10 @@ class DorCheckExemptCiTest < Minitest::Test
 
   REPO_ROOT = File.expand_path("../..", __dir__)
 
+  # ONE spelling of the call, shared by both scans below. Two literals of the same
+  # marker is exactly the drift this section exists to catch, written into the catcher.
+  UNREADABLE_REMEDY_MARKER = "CiStatus.unreadable_remedy("
+
   # Source with FULL-LINE comments removed, so the registry counts CALLS and never the
   # prose about them — this file's own subject is prose drifting from behaviour, and a
   # checker fooled by a comment would be the joke writing itself.
@@ -811,9 +820,74 @@ class DorCheckExemptCiTest < Minitest::Test
     args
   end
 
+  # THE CANDIDATE SET — GLOBBED, NEVER LISTED, and the reason is a mutation rather
+  # than a tidiness preference. UNREADABLE_REMEDY_CALL_SITES is keyed by file path and
+  # the count test iterates it, so for its whole life it opened exactly four files.
+  # RE-MEASURED IN REVIEW, at this branch's own base (32 tests) and head (33). The
+  # first draft of this paragraph quoted a 26-test head — numbers carried over from the
+  # older tree the finding was found on, which is precisely the drift this file exists
+  # to catch, written into itself. One probe, two placements: injected into
+  # bin/dor-check the COUNT test kills it ("Expected: 2" default-takers, found 3); the
+  # IDENTICAL caller in a NEW file, bin/lib/carl_probe.rb, SURVIVED the pre-change
+  # test at 32 runs, 310 assertions, 0 failures — and is KILLED by the set test below
+  # at 33 runs, 316 assertions, 1 failure naming the file. A fifth file was simply
+  # never opened.
+  #
+  # That is more than a test nit, because bin/lib/ci_status.rb's header tells the next
+  # reader this registry "fails when [a caller] appears, vanishes, or changes route.
+  # Add a caller and the suite makes you classify it." True of the four listed files,
+  # FALSE of a new one — so the hole in the test was a hole in a promise the
+  # production code makes in prose. Widening the net here is what makes that sentence
+  # honest without touching it.
+  #
+  # EVERY FILE UNDER bin/ — deliberately not `bin/**/*.rb`. Two of the four callers
+  # the registry ALREADY names, bin/dor-check and bin/pr-review, are extensionless
+  # scripts, so an extension-based glob is born blind to half the known set. Every
+  # narrower rule is a hole of the same shape as the one being closed, and the widest
+  # rule costs one `include?` over ~140 small text files.
+  def bin_files
+    Dir.glob("bin/**/*", base: REPO_ROOT)
+       .select { |path| File.file?(File.join(REPO_ROOT, path)) }
+       .sort
+  end
+
+  # THE FILE SET, asserted against the source — the half the per-file counts cannot
+  # see. An unclassified file now FAILS loudly instead of going unread.
+  def test_unit_the_registry_names_every_file_under_bin_that_calls_unreadable_remedy
+    candidates = bin_files
+
+    # CONTROL FIRST: prove the scan READ what it claims to have read. The set
+    # assertion below is not vacuous when the glob matches nothing — but it IS
+    # satisfied by any glob that reaches all four registry keys and nothing else,
+    # which is the same blindness wearing a glob. `bin/**/*.rb` would drop the two
+    # extensionless callers; `bin/*` plus `bin/lib/*.rb` would reach all four keys
+    # while never descending into bin/lib/dor/checks/. Pin both properties that
+    # narrowing destroys.
+    %w[bin/dor-check bin/pr-review].each do |script|
+      assert_includes candidates, script,
+                      "the candidate glob must reach EXTENSIONLESS bin scripts — two of the four " \
+                      "known callers are exactly that, so a glob that misses them was never " \
+                      "auditing the set it reports on"
+    end
+    assert candidates.any? { |path| path.count("/") >= 3 },
+           "the candidate glob must recurse BELOW bin/<dir>/ — bin/lib/dor/checks/ holds .rb today, " \
+           "and a caller parked one level deeper must not be able to hide"
+
+    callers = candidates.select { |path| code_of(path).include?(UNREADABLE_REMEDY_MARKER) }
+
+    assert_equal UNREADABLE_REMEDY_CALL_SITES.keys.sort, callers,
+                 "the SET OF FILES calling CiStatus.unreadable_remedy changed. A caller in a file " \
+                 "this registry does not name is an unclassified promise about a remedy — decide " \
+                 "its route, then update ci_status.rb's call-site list and the registry above. " \
+                 "(A registry-only key means a caller vanished; a source-only file means a new one " \
+                 "appeared.)\n" \
+                 "registry: #{UNREADABLE_REMEDY_CALL_SITES.keys.sort.inspect}\n" \
+                 "source:   #{callers.inspect}"
+  end
+
   def test_unit_the_unreadable_remedy_call_site_registry_matches_the_source
     UNREADABLE_REMEDY_CALL_SITES.each do |file, expected|
-      args = calls_to(code_of(file), "CiStatus.unreadable_remedy(")
+      args = calls_to(code_of(file), UNREADABLE_REMEDY_MARKER)
       stating, defaulting = args.partition { |arg| arg.include?("cert_route:") }
 
       assert_equal expected[:states_route], stating.size,
